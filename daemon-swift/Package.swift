@@ -17,7 +17,7 @@ let package = Package(
         ),
         .target(
             name: "codexpcCore",
-            dependencies: ["codexpcEngine", "HarmonyFFI"],
+            dependencies: ["codexpcEngine", "OpenAIHarmony"],
             path: "Sources/codexpcCore",
             linkerSettings: [ .linkedFramework("Foundation") ]
         ),
@@ -29,6 +29,9 @@ let package = Package(
                 var flags: [CXXSetting] = [ .headerSearchPath("include") ]
                 if let inc = ProcessInfo.processInfo.environment["GPTOSS_INCLUDE_DIR"], !inc.isEmpty {
                     flags.append(.unsafeFlags(["-I\(inc)"]))
+                }
+                if let stub = ProcessInfo.processInfo.environment["CODEXPC_STUB_ENGINE"], !stub.isEmpty {
+                    flags.append(.unsafeFlags(["-DCODEXPC_STUB_ENGINE=1"]))
                 }
                 return flags
             }(),
@@ -47,24 +50,29 @@ let package = Package(
             }()
         ),
         .target(
-            name: "HarmonyFFI",
-            path: "Sources/HarmonyFFI",
+            name: "OpenAIHarmony",
+            path: "Sources/OpenAIHarmony",
             publicHeadersPath: "include",
             cSettings: {
                 var cs: [CSetting] = []
-                if let inc = ProcessInfo.processInfo.environment["HARMONY_FFI_INCLUDE_DIR"], !inc.isEmpty {
+                if let inc = ProcessInfo.processInfo.environment["HARMONY_INCLUDE_DIR"], !inc.isEmpty {
                     cs.append(.unsafeFlags(["-I\(inc)"]))
                 }
                 return cs
             }(),
             linkerSettings: {
                 var ls: [LinkerSetting] = []
-                if let lib = ProcessInfo.processInfo.environment["HARMONY_FFI_LIB_DIR"], !lib.isEmpty {
+                if let lib = ProcessInfo.processInfo.environment["HARMONY_LIB_DIR"], !lib.isEmpty {
                     ls.append(.unsafeFlags(["-L\(lib)"]))
                 }
-                ls.append(.unsafeFlags(["-lharmony_ffi"]))
+                ls.append(.unsafeFlags(["-lopenai_harmony"]))
                 return ls
             }()
+        ),
+        .testTarget(
+            name: "codexpcCoreTests",
+            dependencies: ["codexpcCore"],
+            path: "Tests/codexpcCoreTests"
         ),
     ]
 )

@@ -7,6 +7,7 @@ struct Args {
     var prompt = ""
     var temperature: Double = 0.0
     var maxTokens: UInt64 = 128
+    var health = false
 }
 
 func parseArgs() -> Args {
@@ -19,6 +20,7 @@ func parseArgs() -> Args {
         case "--prompt": a.prompt = it.next() ?? a.prompt
         case "--temperature": a.temperature = Double(it.next() ?? "0") ?? 0.0
         case "--max-tokens": a.maxTokens = UInt64(it.next() ?? "128") ?? 128
+        case "--health": a.health = true
         default: break
         }
     }
@@ -26,8 +28,8 @@ func parseArgs() -> Args {
 }
 
 let args = parseArgs()
-guard !args.checkpoint.isEmpty else {
-    fputs("usage: codexpc-cli --checkpoint <path> [--prompt <text>] [--service <name>] [--temperature <float>] [--max-tokens <n>]\n", stderr)
+if !args.health && args.checkpoint.isEmpty {
+    fputs("usage: codexpc-cli [--health] --checkpoint <path> [--prompt <text>] [--service <name>] [--temperature <float>] [--max-tokens <n>]\n", stderr)
     exit(2)
 }
 
@@ -38,6 +40,9 @@ xpc_connection_set_event_handler(conn) { ev in
         guard let rid = xpc_dictionary_get_string(ev, "req_id"), String(cString: rid) == reqId else { return }
         let typ = xpc_dictionary_get_string(ev, "type").map { String(cString: $0) } ?? ""
         switch typ {
+        case "health.ok":
+            fputs("health: ok\n", stdout)
+            exit(0)
         case "created":
             fputs("[created]\n", stdout)
         case "output_text.delta":
@@ -62,15 +67,17 @@ xpc_connection_resume(conn)
 let msg = xpc_dictionary_create(nil, nil, 0)
 xpc_dictionary_set_string(msg, "service", args.service)
 xpc_dictionary_set_uint64(msg, "proto_version", 1)
-xpc_dictionary_set_string(msg, "type", "create")
+xpc_dictionary_set_string(msg, "type", args.health ? "health" : "create")
 xpc_dictionary_set_string(msg, "req_id", reqId)
 xpc_dictionary_set_string(msg, "model", "gpt-oss")
-xpc_dictionary_set_string(msg, "checkpoint_path", args.checkpoint)
-xpc_dictionary_set_string(msg, "instructions", args.prompt)
-xpc_dictionary_set_uint64(msg, "max_output_tokens", args.maxTokens)
-let sampling = xpc_dictionary_create(nil, nil, 0)
-xpc_dictionary_set_double(sampling, "temperature", args.temperature)
-xpc_dictionary_set_value(msg, "sampling", sampling)
+if !args.health {
+    xpc_dictionary_set_string(msg, "checkpoint_path", args.checkpoint)
+    xpc_dictionary_set_string(msg, "instructions", args.prompt)
+    xpc_dictionary_set_uint64(msg, "max_output_tokens", args.maxTokens)
+    let sampling = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_double(sampling, "temperature", args.temperature)
+    xpc_dictionary_set_value(msg, "sampling", sampling)
+}
 xpc_connection_send_message(conn, msg)
 
 RunLoop.current.run()

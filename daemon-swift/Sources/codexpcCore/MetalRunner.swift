@@ -24,21 +24,29 @@ final class MetalRunner {
         if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "reset failed: \(rc)"]) }
     }
 
-    func append(text: String) throws {
+    // Appends text and returns number of tokens appended
+    func append(text: String) throws -> Int {
         guard let e = engine else { return }
         var appended: Int = 0
         let rc = text.withCString { cstr in
             codexpc_engine_append_chars(e, cstr, strlen(cstr), &appended)
         }
         if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "append failed: \(rc)"]) }
+        return appended
     }
 
-    func appendSystemFormatted(_ instructions: String, formatter: HarmonyFormatter) throws {
-        guard let e = engine else { return }
-        try formatter.appendSystem(to: e, instructions: instructions)
+    func appendSystemFormatted(_ instructions: String, formatter: HarmonyFormatter) throws -> Int {
+        guard let e = engine else { return 0 }
+        return try formatter.appendSystem(to: e, instructions: instructions)
     }
 
-    func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void) throws {
+    func appendSystemAndUserFormatted(_ instructions: String?, userParts: [String], formatter: HarmonyFormatter) throws -> Int {
+        guard let e = engine else { return 0 }
+        return try formatter.appendSystemAndUser(to: e, instructions: instructions, userParts: userParts)
+    }
+
+    // Streams tokens, calling onDelta with decoded text, and returns number of tokens generated
+    func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void, onToolCall: ((String, String) -> Void)? = nil) throws -> Int {
         guard let e = engine else { return }
         var generated = 0
         var seed: UInt64 = 0
@@ -46,6 +54,7 @@ final class MetalRunner {
         var tokens = [UInt32](repeating: 0, count: batch)
         var outCount: Int = 0
         var buf = [UInt8](repeating: 0, count: 2048)
+        let harmonyDecoder = try? HarmonyStreamDecoder()
 
         while generated < maxTokens && !isCancelled() {
             outCount = 0
@@ -53,20 +62,28 @@ final class MetalRunner {
             if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "sample failed: \(rc)"]) }
             if outCount == 0 { break }
             for i in 0..<outCount {
+                if isCancelled() { return generated }
                 let t = tokens[i]
-                if endToken != 0 && t == endToken { return }
-                var required: Int = 0
-                var drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
-                if drc == -2 { // grow buffer
-                    buf = [UInt8](repeating: 0, count: required)
-                    drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
+                if endToken != 0 && t == endToken { return generated }
+                if let dec = harmonyDecoder {
+                    let res = dec.process(token: t)
+                    if let d = res.delta, !d.isEmpty { onDelta(d) }
+                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input) }
+                } else {
+                    var required: Int = 0
+                    var drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
+                    if drc == -2 { // grow buffer
+                        buf = [UInt8](repeating: 0, count: required)
+                        drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
+                    }
+                    if drc != 0 { throw NSError(domain: "codexpc", code: Int(drc), userInfo: [NSLocalizedDescriptionKey: "decode failed: \(drc)"]) }
+                    let s = String(bytes: buf.prefix(required), encoding: .utf8) ?? ""
+                    if !s.isEmpty { onDelta(s) }
                 }
-                if drc != 0 { throw NSError(domain: "codexpc", code: Int(drc), userInfo: [NSLocalizedDescriptionKey: "decode failed: \(drc)"]) }
-                let s = String(bytes: buf.prefix(required), encoding: .utf8) ?? ""
-                if !s.isEmpty { onDelta(s) }
                 generated += 1
-                if generated >= maxTokens || isCancelled() { return }
+                if generated >= maxTokens || isCancelled() { return generated }
             }
         }
+        return generated
     }
 }

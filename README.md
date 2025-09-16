@@ -11,7 +11,7 @@ This repo is macOS‑only and focuses on low‑latency local inference. It does 
 ## Layout
 
 - `daemon-swift/` — SwiftPM workspace containing the XPC daemon and core
-- `engine-bridge/` — ObjC++/C headers (included by Swift target `codexpcEngine`)
+- `daemon-swift/Sources/codexpcEngine/` — ObjC++/C headers and bridge (Swift target `codexpcEngine`)
 - `client-kotlin-native/` — Kotlin/Native client library that speaks libxpc
 - `cli/` — Minimal debug CLI built on the K/N client
 - `protocol/` — Protocol docs and JSON samples
@@ -72,4 +72,3 @@ Protocol overview and samples are in `protocol/`. The wire is libxpc dictionarie
 - `type` (string)
 
 See `protocol/protocol.md` for request and event details.
-

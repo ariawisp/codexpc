@@ -17,6 +17,8 @@ public final class XpcServer {
 
         let conn = xpc_connection_create_mach_service(self.serviceName, nil, UInt64(XPC_CONNECTION_MACH_SERVICE_LISTENER))
         xpc_connection_set_event_handler(conn) { client in
+            let pid = xpc_connection_get_pid(client)
+            log.info("client connected pid=\(pid)")
             xpc_connection_set_event_handler(client) { event in
                 Self.handleEvent(connection: client, event: event)
             }
@@ -33,6 +35,7 @@ public final class XpcServer {
         if type == XPC_TYPE_ERROR {
             if xpc_equal(event, XPC_ERROR_CONNECTION_INVALID) {
                 log.debug("client connection invalid")
+                SessionManager.shared.cancelAll(forConnection: connection)
             } else if xpc_equal(event, XPC_ERROR_TERMINATION_IMMINENT) {
                 log.debug("termination imminent")
             } else {
@@ -52,12 +55,28 @@ public final class XpcServer {
             return
         }
 
+        // Validate proto_version (expect 1)
+        if let pv = req.uint64("proto_version"), pv != 1 {
+            let msg = xpc_dictionary_create(nil, nil, 0)
+            xpc_dictionary_set_string(msg, "service", "codexpc")
+            xpc_dictionary_set_uint64(msg, "proto_version", 1)
+            xpc_dictionary_set_string(msg, "req_id", reqId)
+            xpc_dictionary_set_uint64(msg, "ts_ns", UInt64(DispatchTime.now().uptimeNanoseconds))
+            xpc_dictionary_set_string(msg, "type", "error")
+            xpc_dictionary_set_string(msg, "code", "unsupported_protocol")
+            xpc_dictionary_set_string(msg, "message", "expected proto_version=1")
+            xpc_connection_send_message(connection, msg)
+            return
+        }
+
+        log.debug("recv msg type=\(msgType, privacy: .public) req_id=\(reqId, privacy: .public)")
         switch msgType {
         case "create":
             SessionManager.shared.handleCreate(connection: connection, req: req, reqId: reqId)
         case "cancel":
             SessionManager.shared.handleCancel(reqId: reqId)
         case "health":
+            log.debug("health ping req_id=\(reqId, privacy: .public)")
             let msg = xpc_dictionary_create(nil, nil, 0)
             xpc_dictionary_set_string(msg, "service", "codexpc")
             xpc_dictionary_set_uint64(msg, "proto_version", 1)
@@ -85,6 +104,9 @@ final class XpcMessage {
         return xpc_dictionary_get_double(obj, key)
     }
     func dict(_ key: String) -> xpc_object_t? {
+        return xpc_dictionary_get_value(obj, key)
+    }
+    func object(_ key: String) -> xpc_object_t? {
         return xpc_dictionary_get_value(obj, key)
     }
 }

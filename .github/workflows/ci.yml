@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build & Test (stubbed engine + stubbed harmony)
+        run: |
+          cd daemon-swift
+          CODEXPC_STUB_ENGINE=1 HARMONY_FFI_STUB=1 swift test -c debug -v

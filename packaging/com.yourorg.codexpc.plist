@@ -6,7 +6,7 @@
   <string>com.yourorg.codexpc</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/codexpcd</string>
+    <string>/opt/codexpc/bin/codexpcd</string>
   </array>
   <key>MachServices</key>
   <dict>
@@ -23,4 +23,3 @@
   <string>$HOME/Library/Logs/com.yourorg.codexpc.err.log</string>
 </dict>
 </plist>
-

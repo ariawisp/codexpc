@@ -29,6 +29,7 @@ To tail logs:
 
 ```
 log stream --predicate 'subsystem == "com.yourorg.codexpc"'
+```
 
 ## Use the Swift CLI for a quick smoke test
 
@@ -39,4 +40,13 @@ cd ../cli-swift
 swift run -c release codexpc-cli --checkpoint /path/to/model.bin --prompt "hello" --temperature 0.0 --max-tokens 64
 ```
 
+You can also ping health without a model:
+
 ```
+swift run -c release codexpc-cli --health
+```
+
+Install locations:
+- Binary: `/opt/codexpc/bin/codexpcd` (fallback: `~/.local/codexpc/bin/codexpcd`)
+- Symlink (if possible): `/usr/local/bin/codexpcd`
+- LaunchAgent: `~/Library/LaunchAgents/com.yourorg.codexpc.plist`

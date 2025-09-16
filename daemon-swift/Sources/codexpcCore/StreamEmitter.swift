@@ -3,6 +3,7 @@ import Foundation
 final class StreamEmitter {
     private let flushIntervalMs: Int
     private let maxBufferBytes: Int
+    private let minFlushBytes: Int
     private let onFlush: (String) -> Void
 
     private let queue = DispatchQueue(label: "com.yourorg.codexpc.stream")
@@ -10,10 +11,12 @@ final class StreamEmitter {
     private var timer: DispatchSourceTimer?
     private var closed = false
 
-    init(flushIntervalMs: Int = 20, maxBufferBytes: Int = 4096, onFlush: @escaping (String) -> Void) {
+    init(flushIntervalMs: Int = 20, maxBufferBytes: Int = 4096, minFlushBytes: Int = 1, onFlush: @escaping (String) -> Void) {
         self.flushIntervalMs = flushIntervalMs
         self.maxBufferBytes = maxBufferBytes
+        self.minFlushBytes = minFlushBytes
         self.onFlush = onFlush
+        self.buffer.reserveCapacity(maxBufferBytes)
     }
 
     func start() {
@@ -47,7 +50,7 @@ final class StreamEmitter {
 
     private func flushIfNeeded(force: Bool) {
         if buffer.isEmpty { return }
-        if !force && buffer.count < 1 { return }
+        if !force && buffer.count < minFlushBytes { return }
         let s = String(data: buffer, encoding: .utf8) ?? ""
         buffer.removeAll(keepingCapacity: true)
         if !s.isEmpty { onFlush(s) }

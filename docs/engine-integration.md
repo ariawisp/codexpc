@@ -36,16 +36,22 @@ swift build -Xcc -I$GPTOSS_INCLUDE_DIR \
 - Verify the symbol `gptoss_model_create_from_file` is resolvable (e.g., `nm -g libgptoss.a | grep gptoss_model_create_from_file`).
 - Verify headers under `gpt-oss/include/gpt-oss/*.h` are visible to the Swift target.
 
-## Harmony formatter via Rust FFI (optional)
+## Harmony formatter via official C API
 
-To avoid maintaining a Swift formatter for the Harmony message format, you can build a tiny Rust static lib that exposes a C ABI using the local Harmony crate.
+Use the first‑class Harmony C API from the `../harmony` repository. Build the static or dynamic library and point SwiftPM at its include and lib directories.
 
 ```
+# Build Harmony static/dynamic libraries
+cd ../harmony
+cargo build --release --target aarch64-apple-darwin
+
+# Back in codexpc, export include/lib dirs
 cd ../codexpc
-./scripts/build-harmony-ffi.sh
-export HARMONY_FFI_INCLUDE_DIR=$PWD/third_party/harmony-ffi/build
-export HARMONY_FFI_LIB_DIR=$PWD/third_party/harmony-ffi/build
+export HARMONY_INCLUDE_DIR=$PWD/../harmony/include
+export HARMONY_LIB_DIR=$PWD/../harmony/target/aarch64-apple-darwin/release
+
+# Build daemon linking libopenai_harmony
 cd daemon-swift && swift build -c release
 ```
 
-The daemon will then link `libharmony_ffi.a` and use it to format the system prompt into segments of special tokens and text.
+The daemon links `libopenai_harmony` and uses it to render Harmony conversations (system + user messages) into token IDs compatible with GPT‑OSS.
