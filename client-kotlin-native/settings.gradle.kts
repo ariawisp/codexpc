@@ -1,0 +1,2 @@
+rootProject.name = "codexpc-client"
+

@@ -1,0 +1,14 @@
+{
+  "proto_version": 1,
+  "service": "codexpc",
+  "type": "create",
+  "req_id": "11111111-2222-3333-4444-555555555555",
+  "model": "gpt-oss-20b",
+  "checkpoint_path": "/path/to/model.bin",
+  "instructions": "You are a helpful assistant.",
+  "input": [],
+  "tools": [],
+  "sampling": { "temperature": 0.0 },
+  "max_output_tokens": 128
+}
+
