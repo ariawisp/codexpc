@@ -72,7 +72,16 @@ xpc_dictionary_set_string(msg, "req_id", reqId)
 xpc_dictionary_set_string(msg, "model", "gpt-oss")
 if !args.health {
     xpc_dictionary_set_string(msg, "checkpoint_path", args.checkpoint)
-    xpc_dictionary_set_string(msg, "instructions", args.prompt)
+    // Prefer sending the prompt as a user input to encourage 'final' channel output
+    if !args.prompt.isEmpty {
+        let arr = xpc_array_create(nil, 0)
+        let item = xpc_dictionary_create(nil, nil, 0)
+        xpc_dictionary_set_string(item, "text", args.prompt)
+        xpc_array_append_value(arr, item)
+        xpc_dictionary_set_value(msg, "input", arr)
+    }
+    // Keep instructions empty for this CLI to avoid double-including prompt in system
+    xpc_dictionary_set_string(msg, "instructions", "")
     xpc_dictionary_set_uint64(msg, "max_output_tokens", args.maxTokens)
     let sampling = xpc_dictionary_create(nil, nil, 0)
     xpc_dictionary_set_double(sampling, "temperature", args.temperature)

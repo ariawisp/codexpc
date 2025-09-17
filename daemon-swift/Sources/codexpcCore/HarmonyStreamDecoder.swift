@@ -1,5 +1,6 @@
 import Foundation
 import OpenAIHarmony
+import os
 
 final class HarmonyStreamDecoder {
     private var enc: UnsafeMutablePointer<HarmonyEncodingHandle>?
@@ -15,6 +16,7 @@ final class HarmonyStreamDecoder {
         if st != HARMONY_STATUS_OK {
             let msg = err.map { String(cString: $0) } ?? "unknown"
             if let e = err { harmony_string_free(e) }
+            log.error("Harmony encoding init failed: \(msg, privacy: .public)")
             throw NSError(domain: "codexpc", code: Int(st.rawValue), userInfo: [NSLocalizedDescriptionKey: "harmony init failed: \(msg)"])
         }
         self.enc = e
@@ -23,9 +25,11 @@ final class HarmonyStreamDecoder {
         if stp != HARMONY_STATUS_OK {
             let msg = err.map { String(cString: $0) } ?? "unknown"
             if let e = err { harmony_string_free(e) }
+            log.error("Harmony parser init failed: \(msg, privacy: .public)")
             throw NSError(domain: "codexpc", code: Int(stp.rawValue), userInfo: [NSLocalizedDescriptionKey: "harmony parser init failed: \(msg)"])
         }
         self.parser = p
+        log.info("HarmonyStreamDecoder initialized")
 
         // Load assistant action stop tokens (e.g., <|call|>, <|return|>)
         var toks = HarmonyOwnedU32Array(data: nil, len: 0)
@@ -51,7 +55,7 @@ final class HarmonyStreamDecoder {
 
     // Process a single token and return delta and/or a tool event
     func process(token: UInt32) -> Result {
-        guard let p = parser else { return nil }
+        guard let p = parser else { return Result(delta: nil, toolEvent: nil) }
         var err: UnsafeMutablePointer<CChar>?
         let st = harmony_streamable_parser_process(p, token, &err)
         if st != HARMONY_STATUS_OK {
@@ -77,7 +81,8 @@ final class HarmonyStreamDecoder {
             let str = String(cString: s)
             if !str.isEmpty {
                 // Only emit user-facing delta if channel is 'final'
-                if channel == "final" {
+                let emitCommentary = (ProcessInfo.processInfo.environment["CODEXPC_DEBUG_EMIT_COMMENTARY"] == "1")
+                if channel == "final" || emitCommentary {
                     deltaStr = str
                 }
             }

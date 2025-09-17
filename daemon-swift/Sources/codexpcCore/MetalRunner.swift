@@ -26,7 +26,7 @@ final class MetalRunner {
 
     // Appends text and returns number of tokens appended
     func append(text: String) throws -> Int {
-        guard let e = engine else { return }
+        guard let e = engine else { return 0 }
         var appended: Int = 0
         let rc = text.withCString { cstr in
             codexpc_engine_append_chars(e, cstr, strlen(cstr), &appended)
@@ -45,16 +45,24 @@ final class MetalRunner {
         return try formatter.appendSystemAndUser(to: e, instructions: instructions, userParts: userParts)
     }
 
+    // Appends a pre-built Harmony conversation JSON via the formatter
+    func appendConversationJSON(conversationJson: String, nextRole: String = "assistant", formatter: HarmonyFormatter) throws -> Int {
+        guard let e = engine else { return 0 }
+        return try formatter.appendConversationJSON(to: e, conversationJson: conversationJson, nextRole: nextRole)
+    }
+
     // Streams tokens, calling onDelta with decoded text, and returns number of tokens generated
     func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void, onToolCall: ((String, String) -> Void)? = nil) throws -> Int {
-        guard let e = engine else { return }
+        guard let e = engine else { return 0 }
         var generated = 0
         var seed: UInt64 = 0
         let batch = 16
         var tokens = [UInt32](repeating: 0, count: batch)
         var outCount: Int = 0
         var buf = [UInt8](repeating: 0, count: 2048)
-        let harmonyDecoder = try? HarmonyStreamDecoder()
+        let useStub = (ProcessInfo.processInfo.environment["HARMONY_FFI_STUB"] == "1")
+        let forceRaw = (ProcessInfo.processInfo.environment["CODEXPC_FORCE_RAW_DECODE"] == "1")
+        let harmonyDecoder = (useStub || forceRaw) ? nil : (try? HarmonyStreamDecoder())
 
         while generated < maxTokens && !isCancelled() {
             outCount = 0
@@ -76,7 +84,10 @@ final class MetalRunner {
                         buf = [UInt8](repeating: 0, count: required)
                         drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
                     }
-                    if drc != 0 { throw NSError(domain: "codexpc", code: Int(drc), userInfo: [NSLocalizedDescriptionKey: "decode failed: \(drc)"]) }
+                    if drc != 0 {
+                        // Skip undecodable token; continue streaming
+                        continue
+                    }
                     let s = String(bytes: buf.prefix(required), encoding: .utf8) ?? ""
                     if !s.isEmpty { onDelta(s) }
                 }

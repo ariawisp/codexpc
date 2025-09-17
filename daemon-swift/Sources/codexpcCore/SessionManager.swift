@@ -40,7 +40,7 @@ final class SessionManager {
             log.info("session finished req_id=\(rid, privacy: .public)")
         }
         sessions[reqId] = s
-        let cid = UInt(bitPattern: connection)
+        let cid: UInt = unsafeBitCast(connection, to: UInt.self)
         reqToConn[reqId] = cid
         var set = connToReqs[cid] ?? []
         set.insert(reqId)
@@ -56,7 +56,7 @@ final class SessionManager {
     }
 
     func cancelAll(forConnection connection: xpc_connection_t) {
-        let cid = UInt(bitPattern: connection)
+        let cid: UInt = unsafeBitCast(connection, to: UInt.self)
         lock.lock(); let reqs = connToReqs[cid] ?? []; lock.unlock()
         for rid in reqs { handleCancel(reqId: rid) }
         lock.lock(); connToReqs.removeValue(forKey: cid); lock.unlock()
@@ -103,97 +103,91 @@ final class Session {
         if let sampling = req.dict("sampling") { temperature = Float(xpc_dictionary_get_double(sampling, "temperature")) }
         if let tflat = req.double("temperature") { temperature = Float(tflat) }
 
-        log.info("session start req_id=\(reqId, privacy: .public) ckpt=\(checkpoint, privacy: .public) temp=\(temperature, privacy: .private(mask: .hash)) max_tokens=\(maxTokens)")
+        log.info("session start req_id=\(self.reqId, privacy: .public) ckpt=\(checkpoint, privacy: .public) temp=\(temperature, privacy: .private(mask: .hash)) max_tokens=\(maxTokens)")
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
             do {
-                let runner = try MetalRunner(checkpointPath: checkpoint)
-                try runner.reset()
-                var inputTokens: UInt64 = 0
-                // Prefer a prebuilt Harmony conversation JSON if provided
-                if let convPtr = xpc_dictionary_get_string(req.obj, "harmony_conversation") {
-                    let conv = String(cString: convPtr)
-                    do {
-                        let fmt = HarmonyFormatter()
-                        let appended = try runner.appendConversationJSON(to: runner.engine!, conversationJson: conv, nextRole: "assistant")
-                        inputTokens += UInt64(appended)
-                    } catch {
-                        log.error("harmony conversation render failed: \(String(describing: error), privacy: .public)")
-                    }
-                } else {
-                    var userParts: [String] = []
-                    if let arr = req.object("input"), xpc_get_type(arr) == XPC_TYPE_ARRAY {
-                        _ = xpc_array_apply(arr) { (_, item) -> Bool in
-                            if xpc_get_type(item) == XPC_TYPE_DICTIONARY {
-                                if let tptr = xpc_dictionary_get_string(item, "text") {
-                                    let t = String(cString: tptr)
-                                    userParts.append(t)
-                                }
-                            }
-                            return true
-                        }
-                    }
-                    // Placeholder: if tools are present, emit a structural output_item.done
-                    if toolsPresent {
-                        self.sendToolPlaceholder()
-                    }
-                    do {
-                        let fmt = HarmonyFormatter()
-                        let appended = try runner.appendSystemAndUserFormatted(instructions.isEmpty ? nil : instructions, userParts: userParts, formatter: fmt)
-                        inputTokens += UInt64(appended)
-                    } catch {
-                        // Fallback: append instructions then raw text
-                        if !instructions.isEmpty {
-                            do { let fmt = HarmonyFormatter(); let a = try runner.appendSystemFormatted(instructions, formatter: fmt); inputTokens += UInt64(a) } catch { }
-                        }
-                        for t in userParts { do { let a = try runner.append(text: t); inputTokens += UInt64(a) } catch { }
-                    }
-                }
-                // Test hook: force a tool call via env var (name:input), for integration tests
-                if let force = ProcessInfo.processInfo.environment["CODEXPC_TEST_FORCE_TOOL"], !force.isEmpty {
-                    let parts = force.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-                    let name = parts.first.map { String($0) } ?? "echo"
-                    let inp = parts.dropFirst().first.map { String($0) } ?? ""
-                    self.sendToolCall(name: name, input: inp)
-                    if self.allowTools {
-                        let output = ToolExecutor.execute(name: name, input: inp)
-                        self.sendToolOutput(name: name, output: output)
-                    }
-                    self.sendCompleted(inputTokens: inputTokens, outputTokens: 0)
-                    self.onFinish(self.reqId)
-                    return
-                }
-
-                let emitter = StreamEmitter(flushIntervalMs: 20, maxBufferBytes: 4096) { [weak self] chunk in
-                    self?.send(eventType: "output_text.delta", body: ["text": chunk])
-                }
-                emitter.start()
-                let outTok = try runner.stream(temperature: temperature, maxTokens: maxTokens, isCancelled: { [weak self] in
-                    return self?.cancelled ?? true
-                }, onDelta: { text in
-                    emitter.submit(text)
-                }, onToolCall: { [weak self] name, input in
-                    guard let self = self else { return }
-                    self.sendToolCall(name: name, input: input)
-                    if self.allowTools {
-                        let res = ToolExecutor.executeWithStatus(name: name, input: input)
-                        if res.ok {
-                            self.sendToolOutput(name: name, output: res.output)
-                        } else {
-                            self.sendToolFailure(name: name, error: res.output)
-                        }
-                    }
-                })
-                emitter.close()
-                self.sendCompleted(inputTokens: inputTokens, outputTokens: UInt64(outTok))
+                try self.runSession(checkpoint: checkpoint, instructions: instructions, maxTokens: maxTokens, temperature: temperature, toolsPresent: toolsPresent)
             } catch {
                 log.error("engine error req_id=\(self.reqId, privacy: .public) error=\(String(describing: error), privacy: .public)")
                 self.sendError(code: "engine_error", message: String(describing: error))
+                let durMs = Double(DispatchTime.now().uptimeNanoseconds - self.startNs) / 1_000_000.0
+                log.info("session duration_ms=\(durMs, privacy: .public) req_id=\(self.reqId, privacy: .public)")
+                self.onFinish(self.reqId)
             }
-            let durMs = Double(DispatchTime.now().uptimeNanoseconds - self.startNs) / 1_000_000.0
-            log.info("session duration_ms=\(durMs, privacy: .public) req_id=\(self.reqId, privacy: .public)")
-            self.onFinish(self.reqId)
         }
+    }
+
+    private func runSession(checkpoint: String, instructions: String, maxTokens: Int, temperature: Float, toolsPresent: Bool) throws {
+        let runner = try MetalRunner(checkpointPath: checkpoint)
+        try runner.reset()
+            var inputTokens: UInt64 = 0
+            // Prefer a prebuilt Harmony conversation JSON if provided
+            if let convPtr = xpc_dictionary_get_string(req.obj, "harmony_conversation") {
+                let conv = String(cString: convPtr)
+                let fmt = try HarmonyFormatter()
+                let appended = try runner.appendConversationJSON(conversationJson: conv, nextRole: "assistant", formatter: fmt)
+                inputTokens += UInt64(appended)
+            } else {
+                var userParts: [String] = []
+                if let arr = req.object("input"), xpc_get_type(arr) == XPC_TYPE_ARRAY {
+                    _ = xpc_array_apply(arr) { (_, item) -> Bool in
+                        if xpc_get_type(item) == XPC_TYPE_DICTIONARY {
+                            if let tptr = xpc_dictionary_get_string(item, "text") {
+                                let t = String(cString: tptr)
+                                userParts.append(t)
+                            }
+                        }
+                        return true
+                    }
+                }
+                if ProcessInfo.processInfo.environment["CODEXPC_FORCE_RAW_DECODE"] == "1" {
+                    let combined = ([instructions].filter { !$0.isEmpty } + userParts).joined(separator: "\n")
+                    do { let a = try runner.append(text: combined); inputTokens += UInt64(a) } catch { }
+                } else {
+                    if toolsPresent { self.sendToolPlaceholder() }
+                    let fmt = try HarmonyFormatter()
+                    let appended = try runner.appendSystemAndUserFormatted(instructions.isEmpty ? nil : instructions, userParts: userParts, formatter: fmt)
+                    inputTokens += UInt64(appended)
+                }
+            }
+            if let force = ProcessInfo.processInfo.environment["CODEXPC_TEST_FORCE_TOOL"], !force.isEmpty {
+                let parts = force.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                let name = parts.first.map { String($0) } ?? "echo"
+                let inp = parts.dropFirst().first.map { String($0) } ?? ""
+                self.sendToolCall(name: name, input: inp)
+                if self.allowTools {
+                    let res = ToolExecutor.executeEnforced(name: name, input: inp)
+                    if res.ok { self.sendToolOutput(name: name, output: res.output) }
+                    else { self.sendToolFailure(name: name, error: res.output) }
+                }
+                self.sendCompleted(inputTokens: inputTokens, outputTokens: 0)
+                self.onFinish(self.reqId)
+                return
+            }
+            let emitter = StreamEmitter(flushIntervalMs: 20, maxBufferBytes: 4096) { [weak self] chunk in
+                self?.send(eventType: "output_text.delta", body: ["text": chunk])
+            }
+            emitter.start()
+            let outTok = try runner.stream(temperature: temperature, maxTokens: maxTokens, isCancelled: { [weak self] in
+                return self?.cancelled ?? true
+            }, onDelta: { text in
+                emitter.submit(text)
+            }, onToolCall: { [weak self] name, input in
+                guard let self = self else { return }
+                self.sendToolCall(name: name, input: input)
+                if self.allowTools {
+                    let res = ToolExecutor.executeEnforced(name: name, input: input)
+                    if res.ok { self.sendToolOutput(name: name, output: res.output) }
+                    else { self.sendToolFailure(name: name, error: res.output) }
+                }
+            })
+            emitter.close()
+            self.sendCompleted(inputTokens: inputTokens, outputTokens: UInt64(outTok))
+        let durMs = Double(DispatchTime.now().uptimeNanoseconds - self.startNs) / 1_000_000.0
+        log.info("session duration_ms=\(durMs, privacy: .public) req_id=\(self.reqId, privacy: .public)")
+        self.onFinish(self.reqId)
     }
 
     func cancel() { cancelled = true }
@@ -275,7 +269,7 @@ final class Session {
         xpc_dictionary_set_string(item, "status", "requested")
         xpc_dictionary_set_string(item, "name", name)
         xpc_dictionary_set_string(item, "input", input)
-        if Self.isValidJson(input) {
+        if Session.isValidJson(input) {
             xpc_dictionary_set_string(item, "arguments", input)
         }
         xpc_dictionary_set_value(msg, "item", item)

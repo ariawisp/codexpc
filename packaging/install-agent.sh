@@ -4,6 +4,34 @@ set -euo pipefail
 PLIST_DST="$HOME/Library/LaunchAgents/com.yourorg.codexpc.plist"
 ROOT_DIR="$(cd "$(dirname "$0")"/.. && pwd)"
 
+echo "Preparing build prerequisites..."
+# Resolve GPT-OSS headers and libs (auto-build if missing)
+DEFAULT_GPTOSS_INCLUDE_DIR="$ROOT_DIR/../gpt-oss/gpt_oss/metal/include"
+DEFAULT_GPTOSS_LIB_DIR="$ROOT_DIR/third_party/gptoss/build"
+GPTOSS_INCLUDE_DIR="${GPTOSS_INCLUDE_DIR:-$DEFAULT_GPTOSS_INCLUDE_DIR}"
+GPTOSS_LIB_DIR="${GPTOSS_LIB_DIR:-$DEFAULT_GPTOSS_LIB_DIR}"
+if [ ! -f "$GPTOSS_LIB_DIR/libgptoss.a" ] || [ ! -f "$GPTOSS_LIB_DIR/default.metallib" ]; then
+  echo "Building GPT-OSS (first run)..."
+  (cd "$ROOT_DIR/scripts" && ./build-gptoss-macos.sh "$DEFAULT_GPTOSS_INCLUDE_DIR")
+fi
+
+# Resolve Harmony C API (optional); fall back to stub if not available
+DEFAULT_HARMONY_INCLUDE_DIR="$ROOT_DIR/../harmony/include"
+DEFAULT_HARMONY_LIB_DIR="$ROOT_DIR/../harmony/target/aarch64-apple-darwin/release"
+HARMONY_INCLUDE_DIR="${HARMONY_INCLUDE_DIR:-$DEFAULT_HARMONY_INCLUDE_DIR}"
+HARMONY_LIB_DIR="${HARMONY_LIB_DIR:-$DEFAULT_HARMONY_LIB_DIR}"
+
+if [ -f "$HARMONY_LIB_DIR/libopenai_harmony.dylib" ]; then
+  export HARMONY_INCLUDE_DIR HARMONY_LIB_DIR
+  unset HARMONY_FFI_STUB || true
+  echo "Using Harmony C API at $HARMONY_LIB_DIR"
+else
+  export HARMONY_FFI_STUB=1
+  echo "Harmony C API not found; building with stub (formatting fallback)."
+fi
+
+export GPTOSS_INCLUDE_DIR GPTOSS_LIB_DIR
+
 echo "Building codexpcd (release)..."
 (cd "$ROOT_DIR/daemon-swift" && swift build -c release)
 
@@ -21,6 +49,18 @@ BIN_PATH="$DEST_DIR/codexpcd"
 echo "Installing binary to $BIN_PATH"
 cp -f "$ROOT_DIR/daemon-swift/.build/release/codexpcd" "$BIN_PATH"
 chmod +x "$BIN_PATH"
+
+# Install runtime resources next to the binary (../lib and ../share/codexpc)
+BASE_DIR="$(cd "$DEST_DIR/.." && pwd)"
+LIB_DIR="$BASE_DIR/lib"
+SHARE_DIR="$BASE_DIR/share/codexpc"
+mkdir -p "$LIB_DIR" "$SHARE_DIR"
+if [ -n "${HARMONY_LIB_DIR:-}" ] && [ -f "$HARMONY_LIB_DIR/libopenai_harmony.dylib" ]; then
+  cp -f "$HARMONY_LIB_DIR/libopenai_harmony.dylib" "$LIB_DIR/"
+fi
+if [ -n "${GPTOSS_LIB_DIR:-}" ] && [ -f "$GPTOSS_LIB_DIR/default.metallib" ]; then
+  cp -f "$GPTOSS_LIB_DIR/default.metallib" "$SHARE_DIR/default.metallib"
+fi
 
 # Create a convenience symlink if possible
 SYMLINK="/usr/local/bin/codexpcd"
@@ -43,6 +83,10 @@ cat >"$PLIST_DST" <<PLIST
   <array>
     <string>${BIN_PATH}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- No env required; binary uses rpath and relative metallib. -->
+  </dict>
   <key>MachServices</key>
   <dict>
     <key>com.yourorg.codexpc</key>

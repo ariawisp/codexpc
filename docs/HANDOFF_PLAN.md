@@ -64,6 +64,13 @@ Acceptance
 Risks/Notes
 - Keep tools local and safe. No shell by default; if ever added, wrap with sandboxing and explicit consent.
 
+Status: Implemented
+- Centralized allowlist and execution policy in `ToolExecutor.executeEnforced` with:
+  - Timeout (default 2000ms; env: `CODEXPC_TOOL_TIMEOUT_MS`).
+  - Output cap by UTF‑8 bytes (default 8192; env: `CODEXPC_TOOL_MAX_OUTPUT_BYTES`).
+  - Test hook to simulate delay (env: `CODEXPC_TEST_TOOL_DELAY_MS`).
+- `SessionManager` now uses enforced execution for both forced and streaming tool calls and emits `completed` or `failed` tool outputs accordingly.
+
 ---
 
 ## Phase 4 — Harmony Conversation Expansion (2–4 days)
@@ -80,6 +87,9 @@ Acceptance
 
 Risks/Notes
 - Harmony C API availability on CI/macOS runners.
+
+Status: In Progress
+- Conversation JSON is built on the Codex side and rendered in the daemon; Harmony stream decoder wired. Need to finalize final‑channel delta emission by default.
 
 ---
 
@@ -98,6 +108,9 @@ Acceptance
 Risks/Notes
 - Codex UI may need small tweaks to display tool outputs distinctly.
 
+Status: Largely Complete
+- Mapping covers `CustomToolCall` and `CustomToolCallOutput`; token usage surfaces where available. Cancellation wired.
+
 ---
 
 ## Phase 6 — Testing & CI (3–5 days)
@@ -108,7 +121,8 @@ Tasks
 - macOS integration tests (ignored by default):
   - Spawn daemon (via CODEXPCD_BIN), force tool calls via `CODEXPC_TEST_FORCE_TOOL` and assert event order: created → tool_call → (tool_call.output) → completed.
 - CI updates:
-  - macOS job runs unit tests by default; provide a manual trigger (workflow_dispatch) for integration tests with secrets/paths.
+  - macOS job runs unit tests by default with stubbed engine and stubbed Harmony C API (no external deps).
+  - Provide an ignored macOS integration test for the daemon (requires local checkpoint and LaunchAgent); include a second test covering tool timeout failure.
 
 Acceptance
 - Unit tests pass on macOS; integration test runs green locally.
@@ -116,6 +130,9 @@ Acceptance
 
 Risks/Notes
 - Integration tests require a local checkpoint and Harmony lib.
+
+Status: Unit tests green; integration test next
+- Swift unit tests pass (tool executor, emitter, Harmony init). A direct GPT‑OSS smoke harness confirms local checkpoints sample/decode.
 
 ---
 
@@ -130,6 +147,9 @@ Acceptance
 
 Risks/Notes
 - Notarization requires Apple Developer account.
+
+Status: Simplified and robust
+- One‑command installer auto‑builds GPT‑OSS if needed, installs daemon and runtime assets (Harmony dylib, default.metallib) next to the binary. LaunchAgent needs no runtime env.
 
 ---
 
@@ -165,12 +185,13 @@ Tasks
 - Docs:
   - Update codexpc README + quickstart + engine-integration with Harmony C API steps.
   - Update Codex docs/integrations/codexpc.md with provider instructions, env vars, and macOS integration test steps.
-- Env vars reference (daemon):
-  - `GPTOSS_INCLUDE_DIR`, `GPTOSS_LIB_DIR` — GPT‑OSS headers/libs
-  - `HARMONY_INCLUDE_DIR`, `HARMONY_LIB_DIR` — Harmony headers/libs
-  - `CODEXPC_ALLOW_TOOLS` (1/0) — enable demo tool execution
-  - `CODEXPC_ALLOWED_TOOLS` ("echo,upper") — allowlist of tool names
-  - `CODEXPC_TEST_FORCE_TOOL` ("name:input") — force a tool call for tests
+- Env vars reference (build‑time only):
+  - `GPTOSS_INCLUDE_DIR`, `GPTOSS_LIB_DIR` — build/link GPT‑OSS; installer copies default.metallib automatically.
+  - `HARMONY_INCLUDE_DIR`, `HARMONY_LIB_DIR` — optional; links Harmony and copies lib for runtime. No runtime env needed.
+  - `CODEXPC_TOOL_TIMEOUT_MS` — per‑call timeout in milliseconds (default 2000)
+  - `CODEXPC_TOOL_MAX_OUTPUT_BYTES` — cap tool output bytes (default 8192)
+  - `CODEXPC_TEST_TOOL_DELAY_MS` — test‑only delay injected into tool execution
+  - `HARMONY_FFI_STUB` (1/0) — build without external Harmony C API by using local stubs (CI‑friendly)
 - Runbooks:
   - How to run daemon locally, health, streaming smoke.
   - How to run macOS unit tests and integration tests.
@@ -198,8 +219,24 @@ Acceptance
   - If Harmony C API surface changes are needed, open an issue/PR in the Harmony repo.
   - For new tools, review safety gates and add tests before enabling.
 
+---
+
+## Updated Handoff Focus (Next Engineer)
+
+1) Finalize streaming UX
+- Ensure Harmony emits final‑channel deltas for simple prompts. Keep raw decode as a safety fallback but prefer Harmony by default.
+- Acceptance: `codexpc-cli --checkpoint <model> --prompt "Hello"` shows visible streaming text without toggles.
+
+2) Add a macOS integration test
+- Foreground daemon + short prompt; assert created → non‑empty delta(s) → completed.
+
+3) Observability polish
+- Log kernel/metallib source, Harmony init success, first N token ids; keep concise.
+
+4) Docs
+- Update README/quickstart to emphasize single‑command install and no runtime env.
+
 ## Verification Checklist (per phase)
 - Unit tests pass locally on macOS (daemon + codex core).
 - Integration test (ignored) passes with a local checkpoint and daemon binary.
 - Manual smoke: Swift CLI `--health`, a short stream, and a forced tool call.
-
