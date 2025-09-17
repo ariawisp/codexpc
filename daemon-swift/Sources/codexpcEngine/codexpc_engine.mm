@@ -1,56 +1,6 @@
-// Auto-select implementation: stub or real
+// Always use the real GPT-OSS integration (no stub support)
 #import "codexpc_engine.h"
 #include <string.h>
-
-#ifdef CODEXPC_STUB_ENGINE
-
-struct codexpc_engine { int dummy; };
-
-int codexpc_engine_open(const char* checkpoint_path, codexpc_engine_t* out_engine) {
-    (void)checkpoint_path;
-    if (!out_engine) return -1;
-    *out_engine = new codexpc_engine();
-    return 0;
-}
-
-int codexpc_engine_reset(codexpc_engine_t engine) { return engine ? 0 : -1; }
-int codexpc_engine_append_tokens(codexpc_engine_t engine, const uint32_t* tokens, size_t num_tokens) {
-    (void)engine; (void)tokens; (void)num_tokens; return 0;
-}
-int codexpc_engine_append_chars(codexpc_engine_t engine, const char* text, size_t text_len, size_t* out_num_tokens) {
-    (void)engine; (void)text; if (out_num_tokens) *out_num_tokens = text_len; return 0;
-}
-int codexpc_engine_sample(codexpc_engine_t engine, float temperature, uint64_t seed,
-                          size_t max_tokens, uint32_t* out_tokens, size_t* out_num_tokens) {
-    (void)engine; (void)temperature; (void)seed;
-    if (!out_tokens || !out_num_tokens) return -1;
-    size_t n = max_tokens < 3 ? max_tokens : 3;
-    // return tokens for 'H', 'i', '\n'
-    if (n >= 1) out_tokens[0] = (uint32_t)('H');
-    if (n >= 2) out_tokens[1] = (uint32_t)('i');
-    if (n >= 3) out_tokens[2] = (uint32_t)('\n');
-    *out_num_tokens = n;
-    return 0;
-}
-int codexpc_engine_decode_token(codexpc_engine_t engine, uint32_t token_id,
-                                void* out_buf, size_t out_buf_size, size_t* out_required_size) {
-    (void)engine;
-    if (!out_required_size) return -1;
-    *out_required_size = 1;
-    if (!out_buf || out_buf_size < 1) return -2;
-    ((char*)out_buf)[0] = (char)token_id;
-    return 0;
-}
-int codexpc_engine_get_end_token_id(codexpc_engine_t engine, uint32_t* out_token_id) {
-    (void)engine; if (!out_token_id) return -1; *out_token_id = 0; return 0;
-}
-int codexpc_engine_get_special_token_id(codexpc_engine_t engine, int token_type, uint32_t* out_token_id) {
-    (void)engine; (void)token_type; if (!out_token_id) return -1; *out_token_id = 0; return 0;
-}
-void codexpc_engine_close(codexpc_engine_t engine) { if (engine) delete engine; }
-
-#else
-
 #include <gpt-oss/functions.h>
 
 struct codexpc_engine {
@@ -68,7 +18,13 @@ int codexpc_engine_open(const char* checkpoint_path, codexpc_engine_t* out_engin
     if (!checkpoint_path || !out_engine) return -1;
     *out_engine = nullptr;
     auto* e = new codexpc_engine();
-    enum gptoss_status st = gptoss_model_create_from_file(checkpoint_path, &e->model, 0);
+    size_t max_batch_tokens = 0;
+    const char* mbt = getenv("CODEXPC_MAX_BATCH_TOKENS");
+    if (mbt && mbt[0] != '\0') {
+        long v = strtol(mbt, NULL, 10);
+        if (v > 0 && v < 65536) { max_batch_tokens = (size_t)v; }
+    }
+    enum gptoss_status st = gptoss_model_create_from_file(checkpoint_path, &e->model, max_batch_tokens);
     if (st != gptoss_status_success) { delete e; return to_errno(st); }
     st = gptoss_model_get_tokenizer(e->model, &e->tokenizer);
     if (st != gptoss_status_success) { gptoss_model_release(e->model); delete e; return to_errno(st); }
@@ -133,5 +89,3 @@ void codexpc_engine_close(codexpc_engine_t engine) {
     if (engine->model) gptoss_model_release(engine->model);
     delete engine;
 }
-
-#endif

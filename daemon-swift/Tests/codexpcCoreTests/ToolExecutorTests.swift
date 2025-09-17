@@ -42,4 +42,22 @@ final class ToolExecutorTests: XCTestCase {
         unsetenv("CODEXPC_TEST_TOOL_DELAY_MS")
         unsetenv("CODEXPC_TOOL_TIMEOUT_MS")
     }
+
+    func testInvalidJsonArgumentsFailValidation() {
+        // Input looks like JSON but is invalid -> should fail validation
+        let bad = ToolExecutor.executeWithStatus(name: "echo", input: "{bad}")
+        XCTAssertFalse(bad.ok)
+        XCTAssertTrue(bad.output.contains("invalid arguments"))
+
+        // JSON without any string field should also fail
+        let noString = ToolExecutor.executeWithStatus(name: "upper", input: "{\"n\":123}")
+        XCTAssertFalse(noString.ok)
+        XCTAssertTrue(noString.output.contains("invalid arguments"))
+    }
+
+    func testUnsupportedToolIsRejected() {
+        let res = ToolExecutor.executeWithStatus(name: "does_not_exist", input: "hi")
+        XCTAssertFalse(res.ok)
+        XCTAssertTrue(res.output.contains("unsupported tool"))
+    }
 }

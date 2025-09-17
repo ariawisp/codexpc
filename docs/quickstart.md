@@ -64,3 +64,5 @@ Testing helpers:
 
 - `CODEXPC_TEST_FORCE_TOOL="name:{\"msg\":\"text\"}"` — force a tool call
 - `CODEXPC_TEST_TOOL_DELAY_MS=50` — simulate a slow tool for timeout testing
+
+Note: Harmony C API is required (no stub). Use `scripts/build-harmony-ffi.sh` before building.

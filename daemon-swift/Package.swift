@@ -18,8 +18,7 @@ let package = Package(
             linkerSettings: {
                 var ls: [LinkerSetting] = []
                 // Propagate GPT-OSS metal kernel force-load to the final binary so __METAL section is present
-                if ProcessInfo.processInfo.environment["CODEXPC_STUB_ENGINE"].map({ !$0.isEmpty }) != true,
-                   let lib = ProcessInfo.processInfo.environment["GPTOSS_LIB_DIR"], !lib.isEmpty {
+                if let lib = ProcessInfo.processInfo.environment["GPTOSS_LIB_DIR"], !lib.isEmpty {
                     ls.append(.unsafeFlags(["-L\(lib)"]))
                     // Embed default.metallib into the main binary so gpt-oss can find __METAL,__shaders
                     ls.append(contentsOf: [
@@ -62,9 +61,6 @@ let package = Package(
                 if let inc = ProcessInfo.processInfo.environment["GPTOSS_INCLUDE_DIR"], !inc.isEmpty {
                     flags.append(.unsafeFlags(["-I\(inc)"]))
                 }
-                if let stub = ProcessInfo.processInfo.environment["CODEXPC_STUB_ENGINE"], !stub.isEmpty {
-                    flags.append(.unsafeFlags(["-DCODEXPC_STUB_ENGINE=1"]))
-                }
                 return flags
             }(),
             linkerSettings: {
@@ -72,19 +68,17 @@ let package = Package(
                 if let lib = ProcessInfo.processInfo.environment["GPTOSS_LIB_DIR"], !lib.isEmpty {
                     ls.append(.unsafeFlags(["-L\(lib)"]))
                 }
-                if ProcessInfo.processInfo.environment["CODEXPC_STUB_ENGINE"].map({ !$0.isEmpty }) != true {
-                    // Link gptoss if not stubbed
-                    ls.append(.unsafeFlags(["-lgptoss"]))
-                    // Ensure metal-kernels section is force-loaded so the embedded metallib is visible to getsectiondata
-                    if let lib = ProcessInfo.processInfo.environment["GPTOSS_LIB_DIR"], !lib.isEmpty {
-                        ls.append(contentsOf: [
-                            .unsafeFlags(["-Xlinker", "-force_load"]),
-                            .unsafeFlags(["-Xlinker", "\(lib)/libmetal-kernels.a"]),
-                        ])
-                    } else {
-                        ls.append(.unsafeFlags(["-Xlinker", "-all_load"]))
-                        ls.append(.unsafeFlags(["-lmetal-kernels"]))
-                    }
+                // Always link gptoss
+                ls.append(.unsafeFlags(["-lgptoss"]))
+                // Ensure metal-kernels section is force-loaded so the embedded metallib is visible to getsectiondata
+                if let lib = ProcessInfo.processInfo.environment["GPTOSS_LIB_DIR"], !lib.isEmpty {
+                    ls.append(contentsOf: [
+                        .unsafeFlags(["-Xlinker", "-force_load"]),
+                        .unsafeFlags(["-Xlinker", "\(lib)/libmetal-kernels.a"]),
+                    ])
+                } else {
+                    ls.append(.unsafeFlags(["-Xlinker", "-all_load"]))
+                    ls.append(.unsafeFlags(["-lmetal-kernels"]))
                 }
                 ls.append(.linkedFramework("Metal"))
                 ls.append(.linkedFramework("IOKit"))
@@ -100,21 +94,14 @@ let package = Package(
                 if let inc = ProcessInfo.processInfo.environment["HARMONY_INCLUDE_DIR"], !inc.isEmpty {
                     cs.append(.unsafeFlags(["-I\(inc)"]))
                 }
-                if let stub = ProcessInfo.processInfo.environment["HARMONY_FFI_STUB"], !stub.isEmpty {
-                    cs.append(.define("HARMONY_FFI_STUB", to: "1"))
-                }
                 return cs
             }(),
             linkerSettings: {
                 var ls: [LinkerSetting] = []
-                if let stub = ProcessInfo.processInfo.environment["HARMONY_FFI_STUB"], !stub.isEmpty {
-                    // no-op: stubbed header and no dynamic library link
-                } else {
-                    if let lib = ProcessInfo.processInfo.environment["HARMONY_LIB_DIR"], !lib.isEmpty {
-                        ls.append(.unsafeFlags(["-L\(lib)"]))
-                    }
-                    ls.append(.unsafeFlags(["-lopenai_harmony"]))
+                if let lib = ProcessInfo.processInfo.environment["HARMONY_LIB_DIR"], !lib.isEmpty {
+                    ls.append(.unsafeFlags(["-L\(lib)"]))
                 }
+                ls.append(.unsafeFlags(["-lopenai_harmony"]))
                 return ls
             }()
         ),

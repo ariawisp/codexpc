@@ -56,12 +56,4 @@ cd daemon-swift && swift build -c release
 
 The daemon links `libopenai_harmony` and uses it to render Harmony conversations (system + user messages) into token IDs compatible with GPT‑OSS.
 
-### Stubbed Harmony for CI/local builds
-
-If you don’t have Harmony built locally yet, you can compile and test with a stubbed C API by setting:
-
-```
-HARMONY_FFI_STUB=1
-```
-
-This uses a tiny local header shim so the Swift build doesn’t require the real Harmony library. Streaming still works; Harmony features are effectively no‑ops.
+Harmony is required; no stub fallback is supported. Build and link the real C API as shown above.

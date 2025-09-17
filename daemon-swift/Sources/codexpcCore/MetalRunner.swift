@@ -1,22 +1,61 @@
 import Foundation
 import codexpcEngine
+import os
 
 final class MetalRunner {
     private var engine: codexpc_engine_t? = nil
+    private static var cacheLock = NSLock()
+    private static var engineCache: [String: (eng: codexpc_engine_t, ref: Int)] = [:]
     private var endToken: UInt32 = 0
 
     init(checkpointPath: String) throws {
-        var e: codexpc_engine_t? = nil
-        let rc = checkpointPath.withCString { cpath in
-            codexpc_engine_open(cpath, &e)
+        // Simple process-wide engine cache keyed by checkpoint path
+        Self.cacheLock.lock()
+        if var entry = Self.engineCache[checkpointPath] {
+            entry.ref += 1
+            Self.engineCache[checkpointPath] = entry
+            self.engine = entry.eng
+            Self.cacheLock.unlock()
+            let ptrStr = String(format: "%p", unsafeBitCast(entry.eng, to: Int.self))
+            log.info("engine cache hit ckpt=\(checkpointPath, privacy: .public) eng=\(ptrStr, privacy: .public) ref=\(entry.ref, privacy: .public)")
+        } else {
+            Self.cacheLock.unlock()
+            var e: codexpc_engine_t? = nil
+            let rc = checkpointPath.withCString { cpath in
+                codexpc_engine_open(cpath, &e)
+            }
+            guard rc == 0, let handle = e else { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "engine open failed: \(rc)"]) }
+            self.engine = handle
+            Self.cacheLock.lock()
+            Self.engineCache[checkpointPath] = (eng: handle, ref: 1)
+            Self.cacheLock.unlock()
+            let ptrStr = String(format: "%p", unsafeBitCast(handle, to: Int.self))
+            log.info("engine open ckpt=\(checkpointPath, privacy: .public) eng=\(ptrStr, privacy: .public) ref=1")
         }
-        guard rc == 0, let handle = e else { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "engine open failed: \(rc)"]) }
-        engine = handle
         var endId: UInt32 = 0
-        if codexpc_engine_get_end_token_id(handle, &endId) == 0 { endToken = endId }
+        if let e = self.engine, codexpc_engine_get_end_token_id(e, &endId) == 0 { endToken = endId }
     }
 
-    deinit { if let e = engine { codexpc_engine_close(e) } }
+    deinit {
+        guard let e = engine else { return }
+        // Decrement refcount and close when last user drops
+        // We cannot retrieve the key here; rely on pointer identity removal
+        Self.cacheLock.lock()
+        if let (key, entry) = Self.engineCache.first(where: { $0.value.eng == e }) {
+            let newRef = entry.ref - 1
+            if newRef <= 0 {
+                Self.engineCache.removeValue(forKey: key)
+                Self.cacheLock.unlock()
+                codexpc_engine_close(e)
+            } else {
+                Self.engineCache[key] = (eng: e, ref: newRef)
+                Self.cacheLock.unlock()
+            }
+        } else {
+            Self.cacheLock.unlock()
+            codexpc_engine_close(e)
+        }
+    }
 
     func reset() throws {
         guard let e = engine else { return }
@@ -60,9 +99,8 @@ final class MetalRunner {
         var tokens = [UInt32](repeating: 0, count: batch)
         var outCount: Int = 0
         var buf = [UInt8](repeating: 0, count: 2048)
-        let useStub = (ProcessInfo.processInfo.environment["HARMONY_FFI_STUB"] == "1")
         let forceRaw = (ProcessInfo.processInfo.environment["CODEXPC_FORCE_RAW_DECODE"] == "1")
-        let harmonyDecoder = (useStub || forceRaw) ? nil : (try? HarmonyStreamDecoder())
+        let harmonyDecoder = forceRaw ? nil : (try? HarmonyStreamDecoder())
 
         while generated < maxTokens && !isCancelled() {
             outCount = 0

@@ -15,19 +15,18 @@ if [ ! -f "$GPTOSS_LIB_DIR/libgptoss.a" ] || [ ! -f "$GPTOSS_LIB_DIR/default.met
   (cd "$ROOT_DIR/scripts" && ./build-gptoss-macos.sh "$DEFAULT_GPTOSS_INCLUDE_DIR")
 fi
 
-# Resolve Harmony C API (optional); fall back to stub if not available
+# Resolve and build Harmony C API (required)
 DEFAULT_HARMONY_INCLUDE_DIR="$ROOT_DIR/../harmony/include"
 DEFAULT_HARMONY_LIB_DIR="$ROOT_DIR/../harmony/target/aarch64-apple-darwin/release"
 HARMONY_INCLUDE_DIR="${HARMONY_INCLUDE_DIR:-$DEFAULT_HARMONY_INCLUDE_DIR}"
 HARMONY_LIB_DIR="${HARMONY_LIB_DIR:-$DEFAULT_HARMONY_LIB_DIR}"
 
-if [ -f "$HARMONY_LIB_DIR/libopenai_harmony.dylib" ]; then
-  export HARMONY_INCLUDE_DIR HARMONY_LIB_DIR
-  unset HARMONY_FFI_STUB || true
-  echo "Using Harmony C API at $HARMONY_LIB_DIR"
-else
-  export HARMONY_FFI_STUB=1
-  echo "Harmony C API not found; building with stub (formatting fallback)."
+echo "Building Harmony (required)..."
+"$ROOT_DIR/scripts/build-harmony-ffi.sh"
+export HARMONY_INCLUDE_DIR HARMONY_LIB_DIR
+if [ ! -f "$HARMONY_LIB_DIR/libopenai_harmony.dylib" ]; then
+  echo "error: Harmony build did not produce libopenai_harmony.dylib in $HARMONY_LIB_DIR" >&2
+  exit 3
 fi
 
 export GPTOSS_INCLUDE_DIR GPTOSS_LIB_DIR
@@ -85,7 +84,12 @@ cat >"$PLIST_DST" <<PLIST
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <!-- No env required; binary uses rpath and relative metallib. -->
+    <key>GPTOSS_WEIGHTS_PRIVATE</key>
+    <string>1</string>
+    <key>GPTOSS_DISABLE_MLOCK</key>
+    <string>1</string>
+    <key>CODEXPC_MAX_BATCH_TOKENS</key>
+    <string>32</string>
   </dict>
   <key>MachServices</key>
   <dict>

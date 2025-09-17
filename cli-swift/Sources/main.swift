@@ -52,6 +52,21 @@ xpc_connection_set_event_handler(conn) { ev in
         case "completed":
             fputs("\n[completed]\n", stdout)
             exit(0)
+        case "output_item.done":
+            if let item = xpc_dictionary_get_value(ev, "item") {
+                let itype = xpc_dictionary_get_string(item, "type").map { String(cString: $0) } ?? ""
+                let status = xpc_dictionary_get_string(item, "status").map { String(cString: $0) } ?? ""
+                let name = xpc_dictionary_get_string(item, "name").map { String(cString: $0) } ?? ""
+                if itype == "tool_call" || itype == "tool_call.placeholder" {
+                    let input = xpc_dictionary_get_string(item, "input").map { String(cString: $0) }
+                    let args = xpc_dictionary_get_string(item, "arguments").map { String(cString: $0) }
+                    let show = input ?? args ?? ""
+                    fputs("\n[tool_call] name=\(name) status=\(status) input=\(show)\n", stdout)
+                } else if itype == "tool_call.output" {
+                    let output = xpc_dictionary_get_string(item, "output").map { String(cString: $0) } ?? ""
+                    fputs("\n[tool_call.output] name=\(name) status=\(status) output=\(output)\n", stdout)
+                }
+            }
         case "error":
             let code = xpc_dictionary_get_string(ev, "code").map { String(cString: $0) } ?? ""
             let msg = xpc_dictionary_get_string(ev, "message").map { String(cString: $0) } ?? ""
