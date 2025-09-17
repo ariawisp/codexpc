@@ -4,7 +4,7 @@ import codexpcEngine
 struct Args {
     var checkpoint = ""
     var prompt = "Hello"
-    var tokens: Int = 16
+    var tokens: Int = 16 // 0 = unlimited
     var temperature: Double = 0.0
 }
 
@@ -25,7 +25,7 @@ func parseArgs() -> Args {
 
 let args = parseArgs()
 guard !args.checkpoint.isEmpty else {
-    fputs("usage: gptoss-smoke --checkpoint <path> [--prompt <text>] [--tokens <n>] [--temperature <float>]\n", stderr)
+    fputs("usage: gptoss-smoke --checkpoint <path> [--prompt <text>] [--tokens <n (0=unlimited)>] [--temperature <float>]\n", stderr)
     exit(2)
 }
 
@@ -38,31 +38,46 @@ guard rcOpen == 0, let e = engine else {
 defer { codexpc_engine_close(e) }
 
 let rcReset = codexpc_engine_reset(e)
-if rcReset != 0 { fputs("reset rc=\(rcReset)\n", stderr) }
+if rcReset != 0 { /* continue */ }
 
 var appended: Int = 0
-let rcAppend = args.prompt.withCString { c in codexpc_engine_append_chars(e, c, strlen(c), &appended) }
-print("append rc=\(rcAppend) tokens=\(appended)")
+_ = args.prompt.withCString { c in codexpc_engine_append_chars(e, c, strlen(c), &appended) }
+
+// Emit created marker
+fputs("[created]\n", stdout); fflush(stdout)
 
 var endId: UInt32 = 0
 let _ = codexpc_engine_get_end_token_id(e, &endId)
 
-let maxT = max(1, args.tokens)
-var toks = [UInt32](repeating: 0, count: maxT)
+let batch = 16
+var toks = [UInt32](repeating: 0, count: batch)
 var outCount: Int = 0
-let rcSample = codexpc_engine_sample(e, Float(args.temperature), 0, maxT, &toks, &outCount)
-print("sample rc=\(rcSample) count=\(outCount)")
-
 var buf = [UInt8](repeating: 0, count: 4096)
-var out = ""
-for i in 0..<outCount {
-    if endId != 0 && toks[i] == endId { print("<END>"); break }
-    var required: Int = 0
-    var rc = codexpc_engine_decode_token(e, toks[i], &buf, buf.count, &required)
-    if rc == -2 && required > buf.count { buf = [UInt8](repeating: 0, count: required); rc = codexpc_engine_decode_token(e, toks[i], &buf, buf.count, &required) }
-    if rc != 0 { print("decode rc=\(rc) for token=\(toks[i]) req=\(required)"); continue }
-    let s = String(bytes: buf.prefix(required), encoding: .utf8) ?? ""
-    out += s
-}
-print("decoded=\n\(out)")
+let temp = Float(args.temperature)
+let unlimited = (args.tokens <= 0)
+var generated = 0
 
+outer: while unlimited || generated < args.tokens {
+    outCount = 0
+    let rc = codexpc_engine_sample(e, temp, 0, batch, &toks, &outCount)
+    if rc != 0 || outCount == 0 { break }
+    for i in 0..<outCount {
+        let t = toks[i]
+        if endId != 0 && t == endId { break outer }
+        var required: Int = 0
+        var drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
+        if drc == -2 && required > buf.count {
+            buf = [UInt8](repeating: 0, count: required)
+            drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
+        }
+        if drc == 0 {
+            let s = String(bytes: buf.prefix(required), encoding: .utf8) ?? ""
+            if !s.isEmpty { fputs(s, stdout); fflush(stdout) }
+        }
+        generated += 1
+        if !unlimited && generated >= args.tokens { break outer }
+    }
+}
+
+// Emit completed marker
+fputs("\n[completed]\n", stdout); fflush(stdout)

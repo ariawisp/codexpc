@@ -33,13 +33,9 @@ This update reflects fixes landed during this pass, the current known-good runbo
 - Streaming verification with large models: With `GPTOSS_WEIGHTS_PRIVATE=1`, `GPTOSS_DISABLE_MLOCK=1`, and a reasonable `CODEXPC_MAX_BATCH_TOKENS` (e.g., 32), streaming should produce deltas on 20B. If not, validate tokenizer/decoder path and Harmony stub toggles.
 
 ## Handoff Checklist (Do This First)
-1) Install daemon and set envs in the LaunchAgent (per‑user):
-   - `GPTOSS_WEIGHTS_PRIVATE=1` (Private buffers + chunked blit uploads)
-   - `GPTOSS_DISABLE_MLOCK=1` (don’t pin the entire 13GB mapping)
-   - `CODEXPC_MAX_BATCH_TOKENS=32` (smaller activation buffers)
-   - Optional debug: `CODEXPC_FORCE_RAW_DECODE=1` (bypass Harmony stream decoder)
-   - Tools (optional): `CODEXPC_ALLOW_TOOLS=1`, `CODEXPC_ALLOWED_TOOLS="echo,upper"`
-2) Reload agent: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.yourorg.codexpc.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yourorg.codexpc.plist`
+1) Install daemon (no runtime env required):
+   - `../packaging/install-agent.sh`
+2) Reload agent if needed: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.yourorg.codexpc.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yourorg.codexpc.plist`
 3) Verify health: `swift run -c release codexpc-cli --health` → `health: ok`.
 4) Verify first load logs: in `~/Library/Logs/com.yourorg.codexpc.err.log` expect:
    - `Warning: using Private storage upload for shared weights (...)`
@@ -51,12 +47,11 @@ This update reflects fixes landed during this pass, the current known-good runbo
 1) Stabilize Private weight upload
    - Ensure we never re‑upload on subsequent requests (engine cache hits). Add a log line on cache hit/miss.
    - Cap upload chunk size by device limit (consider querying `maxBufferLength`).
-   - Add env kill‑switch: `GPTOSS_WEIGHTS_PRIVATE=0` to restore legacy.
+   - No env toggles in the default path; keep behavior fixed.
    Acceptance: first request logs show uploads; second request shows no uploads; deltas stream.
 
 2) Activation memory guardrails
-   - Make `CODEXPC_MAX_BATCH_TOKENS` default conservative (e.g., 32) under LaunchAgent. Allow override in plist.
-   - Optionally compute a safe default from device memory + model dims.
+   - Default conservative batch clamp (32) is baked in; consider dynamic sizing in future.
    Acceptance: Activity Monitor shows stable RSS after first request; second request does not grow.
 
 3) Foreground dev mode
@@ -64,24 +59,15 @@ This update reflects fixes landed during this pass, the current known-good runbo
    - Document how to run CLI against the foreground daemon.
    Acceptance: foreground run streams tokens with the same envs on first try.
 
-4) Harmony stream decoder toggle
-  - Keep `CODEXPC_FORCE_RAW_DECODE=1` available to isolate decoder issues; default off. Harmony is required (no stub fallback).
-  - Add a unit test to confirm commentary suppression (final only) when Harmony is enabled.
+4) Harmony stream decoder
+  - Harmony decoding is always on by default. Commentary deltas suppressed.
+  - Add a unit test to confirm commentary suppression (final only).
 
 5) Upstream GPT‑OSS PR (optional)
    - Contribute Private‑storage upload + `GPTOSS_DISABLE_MLOCK` guard upstream, behind env flags.
 
-## Env Vars (Reference)
-- Build/link:
-  - `GPTOSS_INCLUDE_DIR`, `GPTOSS_LIB_DIR` – build/link GPT‑OSS; metallib is bundled by installer.
-  - `HARMONY_INCLUDE_DIR`, `HARMONY_LIB_DIR` – link official Harmony C API (required).
-- Runtime (daemon):
-  - `GPTOSS_WEIGHTS_PRIVATE=1` – use Private buffers + chunked blit uploads (recommended under LaunchAgent).
-  - `GPTOSS_DISABLE_MLOCK=1` – don’t `mlock` the mapped model file.
-  - `CODEXPC_MAX_BATCH_TOKENS` – clamp activation buffers; e.g., 32.
-  - `CODEXPC_ALLOW_TOOLS=1`, `CODEXPC_ALLOWED_TOOLS="echo,upper"`, `CODEXPC_TOOL_TIMEOUT_MS`, `CODEXPC_TOOL_MAX_OUTPUT_BYTES`.
-  - `CODEXPC_TEST_FORCE_TOOL` – force deterministic tool call for smoke tests.
-  - `CODEXPC_FORCE_RAW_DECODE=1` – bypass Harmony stream decoder for troubleshooting.
+## Env Vars
+None required at runtime. Build/link envs may be used for local development only.
 
 ## Validation Matrix
 - Health: CLI `--health` returns ok.
@@ -102,9 +88,9 @@ This update reflects fixes landed during this pass, the current known-good runbo
 - Installer/LaunchAgent: `packaging/`
 
 ## Quick Troubleshooting
-- No deltas, immediate completed: ensure Harmony linked correctly and decoder not swallowing commentary; set `CODEXPC_FORCE_RAW_DECODE=1` to bypass.
-- Memory spikes: confirm `GPTOSS_DISABLE_MLOCK=1`, clamp `CODEXPC_MAX_BATCH_TOKENS`, and verify engine cache reuse (no upload logs on second request).
-- Metal library not found in smoke: ensure `default.metallib` is copied next to binary (installer does this), or set `GPTOSS_LIB_DIR` env.
+- No deltas, immediate completed: ensure Harmony linked correctly and decoder not swallowing commentary (decoder is enabled by default). Check logs for engine errors.
+- Memory spikes: batch clamp defaults to 32; verify engine cache reuse (no upload logs on second request).
+- Metal library not found in smoke: ensure `default.metallib` is copied next to binary by the installer.
 
 ---
 

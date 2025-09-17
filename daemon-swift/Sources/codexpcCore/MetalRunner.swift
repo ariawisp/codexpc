@@ -99,22 +99,51 @@ final class MetalRunner {
         var tokens = [UInt32](repeating: 0, count: batch)
         var outCount: Int = 0
         var buf = [UInt8](repeating: 0, count: 2048)
-        let forceRaw = (ProcessInfo.processInfo.environment["CODEXPC_FORCE_RAW_DECODE"] == "1")
-        let harmonyDecoder = forceRaw ? nil : (try? HarmonyStreamDecoder())
+        let harmonyDecoder = try? HarmonyStreamDecoder()
+        var usingHarmony = (harmonyDecoder != nil)
+        // Clamp temperature to a sane range and handle NaN/infinite
+        var temp = temperature
+        if !temp.isFinite || temp < 0 { temp = 0.0 }
+        if temp > 4.0 { temp = 4.0 }
+        log.info("stream start temp=\(temp, privacy: .public) max=\(maxTokens) harmony=\(usingHarmony)")
+        var loggedSample = false
+        var emptySamples = 0
+        var loggedFirstDelta = false
+        var sawFinal = false
 
         while generated < maxTokens && !isCancelled() {
             outCount = 0
-            let rc = codexpc_engine_sample(e, temperature, seed, Int(batch), &tokens, &outCount)
+            let rc = codexpc_engine_sample(e, temp, seed, Int(batch), &tokens, &outCount)
             if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "sample failed: \(rc)"]) }
-            if outCount == 0 { break }
+            if !loggedSample {
+                log.info("sample rc=\(rc) out=\(outCount)")
+                loggedSample = true
+            }
+            if outCount == 0 {
+                emptySamples += 1
+                if emptySamples % 10 == 0 { log.debug("sample empty count=\(emptySamples)") }
+                continue
+            }
             for i in 0..<outCount {
                 if isCancelled() { return generated }
                 let t = tokens[i]
-                if endToken != 0 && t == endToken { return generated }
-                if let dec = harmonyDecoder {
+                if !usingHarmony, endToken != 0 && t == endToken { return generated }
+                if usingHarmony, let dec = harmonyDecoder {
                     let res = dec.process(token: t)
-                    if let d = res.delta, !d.isEmpty { onDelta(d) }
-                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input) }
+                    if let d = res.delta, !d.isEmpty {
+                        if !loggedFirstDelta { log.info("first delta len=\(d.count)"); loggedFirstDelta = true }
+                        sawFinal = true
+                        onDelta(d)
+                    }
+                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input); return generated }
+                    if res.isStop {
+                        if sawFinal {
+                            return generated
+                        } else {
+                            // Ignore premature stop until we have final
+                            continue
+                        }
+                    }
                 } else {
                     var required: Int = 0
                     var drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
@@ -127,9 +156,17 @@ final class MetalRunner {
                         continue
                     }
                     let s = String(bytes: buf.prefix(required), encoding: .utf8) ?? ""
-                    if !s.isEmpty { onDelta(s) }
+                    if !s.isEmpty {
+                        if !loggedFirstDelta { log.info("first delta len=\(s.count)"); loggedFirstDelta = true }
+                        onDelta(s)
+                    }
                 }
                 generated += 1
+                // If Harmony produced no deltas across a reasonable number of tokens, fall back to raw decode
+                if usingHarmony && !loggedFirstDelta && generated >= 128 {
+                    usingHarmony = false
+                    log.info("decoder fallback: switching to raw decode after \(generated) tokens without delta")
+                }
                 if generated >= maxTokens || isCancelled() { return generated }
             }
         }

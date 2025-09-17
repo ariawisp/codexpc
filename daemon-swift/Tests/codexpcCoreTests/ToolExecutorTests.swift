@@ -13,34 +13,48 @@ final class ToolExecutorTests: XCTestCase {
     }
 
     func testAllowedToolsGate() {
-        // Simulate allowed list by setting env var
-        setenv("CODEXPC_ALLOWED_TOOLS", "echo", 1)
+        // Enable tools and allow only echo
+        let prevEnabled = ToolExecutor.Config.enabled
+        let prevAllowed = ToolExecutor.Config.allowed
+        ToolExecutor.Config.enabled = true
+        ToolExecutor.Config.allowed = ["echo"]
         let allowed = ToolExecutor.executeWithStatus(name: "echo", input: "x")
         let blocked = ToolExecutor.executeWithStatus(name: "upper", input: "x")
         XCTAssertEqual(allowed.output, "x")
         XCTAssertTrue(allowed.ok)
         XCTAssertTrue(blocked.output.contains("not allowed"))
         XCTAssertFalse(blocked.ok)
-        unsetenv("CODEXPC_ALLOWED_TOOLS")
+        // restore
+        ToolExecutor.Config.allowed = prevAllowed
+        ToolExecutor.Config.enabled = prevEnabled
     }
 
     func testOutputCapIsApplied() {
-        setenv("CODEXPC_TOOL_MAX_OUTPUT_BYTES", "8", 1)
+        let prevEnabled = ToolExecutor.Config.enabled
+        let prevMax = ToolExecutor.Config.maxOutputBytes
+        ToolExecutor.Config.enabled = true
+        ToolExecutor.Config.maxOutputBytes = 8
         let long = String(repeating: "é", count: 16) // multi-byte char
         let res = ToolExecutor.executeEnforced(name: "echo", input: long)
         XCTAssertTrue(res.ok)
         XCTAssertLessThanOrEqual(res.output.utf8.count, 8)
-        unsetenv("CODEXPC_TOOL_MAX_OUTPUT_BYTES")
+        ToolExecutor.Config.maxOutputBytes = prevMax
+        ToolExecutor.Config.enabled = prevEnabled
     }
 
     func testTimeoutTriggersFailure() {
-        setenv("CODEXPC_TOOL_TIMEOUT_MS", "10", 1)
-        setenv("CODEXPC_TEST_TOOL_DELAY_MS", "50", 1)
+        let prevEnabled = ToolExecutor.Config.enabled
+        let prevTimeout = ToolExecutor.Config.timeoutMs
+        let prevDelay = ToolExecutor.Config.testDelayMs
+        ToolExecutor.Config.enabled = true
+        ToolExecutor.Config.timeoutMs = 10
+        ToolExecutor.Config.testDelayMs = 50
         let res = ToolExecutor.executeEnforced(name: "echo", input: "hello")
         XCTAssertFalse(res.ok)
         XCTAssertTrue(res.output.contains("timed out"))
-        unsetenv("CODEXPC_TEST_TOOL_DELAY_MS")
-        unsetenv("CODEXPC_TOOL_TIMEOUT_MS")
+        ToolExecutor.Config.testDelayMs = prevDelay
+        ToolExecutor.Config.timeoutMs = prevTimeout
+        ToolExecutor.Config.enabled = prevEnabled
     }
 
     func testInvalidJsonArgumentsFailValidation() {

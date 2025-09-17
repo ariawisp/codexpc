@@ -3,12 +3,12 @@ import OpenAIHarmony
 import codexpcEngine
 
 final class HarmonyFormatter {
-    private var enc: UnsafeMutablePointer<HarmonyEncodingHandle>?
+    private var enc: OpaquePointer?
 
     init() throws {
-        var handle: UnsafeMutablePointer<HarmonyEncodingHandle>?
+        var handle: OpaquePointer?
         var err: UnsafeMutablePointer<CChar>?
-        let status = harmony_encoding_new("harmony_gpt_oss", &handle, &err)
+        let status = harmony_encoding_new("HarmonyGptOss", &handle, &err)
         if status != HARMONY_STATUS_OK {
             let msg = err.map { String(cString: $0) } ?? "unknown"
             if let e = err { harmony_string_free(e) }
@@ -88,11 +88,16 @@ final class HarmonyFormatter {
         var parts: [String] = []
         if let s = system, !s.isEmpty {
             let esc = jsonEscape(s)
-            parts.append("{\"author\":{\"role\":\"system\"},\"content\":[{\"text\":\"\(esc)\"}]}")
+            parts.append("{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"\(esc)\"}]}")
+        } else {
+            // Provide a minimal system scaffold to steer the model to emit final-channel text
+            let sys = "# Valid channels: analysis, commentary, final.\nAlways write user-facing responses in the final channel; use analysis only for internal reasoning."
+            let esc = jsonEscape(sys)
+            parts.append("{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"\(esc)\"}]}")
         }
         for u in users where !u.isEmpty {
             let esc = jsonEscape(u)
-            parts.append("{\"author\":{\"role\":\"user\"},\"content\":[{\"text\":\"\(esc)\"}]}")
+            parts.append("{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\(esc)\"}]}")
         }
         let msgs = parts.joined(separator: ",")
         return "{\"messages\":[\(msgs)]}"

@@ -3,16 +3,16 @@ import OpenAIHarmony
 import os
 
 final class HarmonyStreamDecoder {
-    private var enc: UnsafeMutablePointer<HarmonyEncodingHandle>?
-    private var parser: UnsafeMutablePointer<HarmonyStreamableParserHandle>?
+    private var enc: OpaquePointer?
+    private var parser: OpaquePointer?
     private var actionStopTokens: Set<UInt32> = []
     private var toolRecipient: String? = nil
     private var toolBuffer: String = ""
 
     init() throws {
-        var e: UnsafeMutablePointer<HarmonyEncodingHandle>?
+        var e: OpaquePointer?
         var err: UnsafeMutablePointer<CChar>?
-        let st = harmony_encoding_new("harmony_gpt_oss", &e, &err)
+        let st = harmony_encoding_new("HarmonyGptOss", &e, &err)
         if st != HARMONY_STATUS_OK {
             let msg = err.map { String(cString: $0) } ?? "unknown"
             if let e = err { harmony_string_free(e) }
@@ -20,7 +20,7 @@ final class HarmonyStreamDecoder {
             throw NSError(domain: "codexpc", code: Int(st.rawValue), userInfo: [NSLocalizedDescriptionKey: "harmony init failed: \(msg)"])
         }
         self.enc = e
-        var p: UnsafeMutablePointer<HarmonyStreamableParserHandle>?
+        var p: OpaquePointer?
         let stp = harmony_streamable_parser_new(self.enc, "assistant", &p, &err)
         if stp != HARMONY_STATUS_OK {
             let msg = err.map { String(cString: $0) } ?? "unknown"
@@ -51,16 +51,17 @@ final class HarmonyStreamDecoder {
     struct Result {
         let delta: String?
         let toolEvent: (name: String, input: String)?
+        let isStop: Bool
     }
 
     // Process a single token and return delta and/or a tool event
     func process(token: UInt32) -> Result {
-        guard let p = parser else { return Result(delta: nil, toolEvent: nil) }
+        guard let p = parser else { return Result(delta: nil, toolEvent: nil, isStop: false) }
         var err: UnsafeMutablePointer<CChar>?
         let st = harmony_streamable_parser_process(p, token, &err)
         if st != HARMONY_STATUS_OK {
             if let e = err { harmony_string_free(e) }
-            return Result(delta: nil, toolEvent: nil)
+            return Result(delta: nil, toolEvent: nil, isStop: false)
         }
         var deltaStr: String? = nil
         // Determine channel and recipient
@@ -74,15 +75,14 @@ final class HarmonyStreamDecoder {
         let recipient = rcptPtr.map { String(cString: $0) }
         if let r = rcptPtr { harmony_string_free(r) }
 
-        // Accumulate delta
+        // Accumulate delta (only user-facing 'final' channel)
         var cstr: UnsafeMutablePointer<CChar>?
         let dl = harmony_streamable_parser_last_content_delta(p, &cstr, &err)
         if dl == HARMONY_STATUS_OK, let s = cstr {
             let str = String(cString: s)
             if !str.isEmpty {
                 // Only emit user-facing delta if channel is 'final'
-                let emitCommentary = (ProcessInfo.processInfo.environment["CODEXPC_DEBUG_EMIT_COMMENTARY"] == "1")
-                if channel == "final" || emitCommentary {
+                if channel == "final" {
                     deltaStr = str
                 }
             }
@@ -96,12 +96,13 @@ final class HarmonyStreamDecoder {
             // Append all delta (even if not final) to tool buffer
             if let dl = deltaStr { toolBuffer += dl }
         }
-        if actionStopTokens.contains(token), let rec = toolRecipient, !rec.isEmpty {
+        let isStop = actionStopTokens.contains(token)
+        if isStop, let rec = toolRecipient, !rec.isEmpty {
             toolEvent = (rec, toolBuffer)
             toolRecipient = nil
             toolBuffer = ""
         }
 
-        return Result(delta: deltaStr, toolEvent: toolEvent)
+        return Result(delta: deltaStr, toolEvent: toolEvent, isStop: isStop)
     }
 }

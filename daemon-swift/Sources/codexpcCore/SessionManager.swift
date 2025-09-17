@@ -79,7 +79,7 @@ final class Session {
         self.req = req
         self.onFinish = onFinish
         self.startNs = DispatchTime.now().uptimeNanoseconds
-        self.allowTools = (ProcessInfo.processInfo.environment["CODEXPC_ALLOW_TOOLS"] == "1")
+        self.allowTools = ToolExecutor.Config.enabled
     }
 
     func start() {
@@ -97,7 +97,7 @@ final class Session {
             sendError(code: "bad_request", message: "missing checkpoint_path"); return
         }
         let instructions = req.string("instructions") ?? ""
-        var maxTokens = 128
+        var maxTokens = 0 // 0 = unlimited until EOS
         if let maxTok = req.uint64("max_output_tokens") { maxTokens = Int(maxTok) }
         var temperature: Float = 0.0
         if let sampling = req.dict("sampling") { temperature = Float(xpc_dictionary_get_double(sampling, "temperature")) }
@@ -129,6 +129,7 @@ final class Session {
                 let fmt = try HarmonyFormatter()
                 let appended = try runner.appendConversationJSON(conversationJson: conv, nextRole: "assistant", formatter: fmt)
                 inputTokens += UInt64(appended)
+                log.info("harmony append (json) tokens=\(appended)")
             } else {
                 var userParts: [String] = []
                 if let arr = req.object("input"), xpc_get_type(arr) == XPC_TYPE_ARRAY {
@@ -142,37 +143,35 @@ final class Session {
                         return true
                     }
                 }
-                if ProcessInfo.processInfo.environment["CODEXPC_FORCE_RAW_DECODE"] == "1" {
-                    let combined = ([instructions].filter { !$0.isEmpty } + userParts).joined(separator: "\n")
-                    do { let a = try runner.append(text: combined); inputTokens += UInt64(a) } catch { }
-                } else {
-                    if toolsPresent { self.sendToolPlaceholder() }
-                    let fmt = try HarmonyFormatter()
-                    let appended = try runner.appendSystemAndUserFormatted(instructions.isEmpty ? nil : instructions, userParts: userParts, formatter: fmt)
-                    inputTokens += UInt64(appended)
-                }
+                if toolsPresent { self.sendToolPlaceholder() }
+                let fmt = try HarmonyFormatter()
+                let appended = try runner.appendSystemAndUserFormatted(instructions.isEmpty ? nil : instructions, userParts: userParts, formatter: fmt)
+                inputTokens += UInt64(appended)
+                log.info("harmony append tokens=\(appended) user_parts=\(userParts.count)")
             }
-            if let force = ProcessInfo.processInfo.environment["CODEXPC_TEST_FORCE_TOOL"], !force.isEmpty {
-                let parts = force.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-                let name = parts.first.map { String($0) } ?? "echo"
-                let inp = parts.dropFirst().first.map { String($0) } ?? ""
-                self.sendToolCall(name: name, input: inp)
-                if self.allowTools {
-                    let res = ToolExecutor.executeEnforced(name: name, input: inp)
-                    if res.ok { self.sendToolOutput(name: name, output: res.output) }
-                    else { self.sendToolFailure(name: name, error: res.output) }
-                }
-                self.sendCompleted(inputTokens: inputTokens, outputTokens: 0)
-                self.onFinish(self.reqId)
-                return
-            }
+            // No forced tool call path; tools are optional and controlled by ToolExecutor.Config
             let emitter = StreamEmitter(flushIntervalMs: 20, maxBufferBytes: 4096) { [weak self] chunk in
                 self?.send(eventType: "output_text.delta", body: ["text": chunk])
             }
             emitter.start()
-            let outTok = try runner.stream(temperature: temperature, maxTokens: maxTokens, isCancelled: { [weak self] in
+            var sawDelta = false
+            let watchdog = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            watchdog.schedule(deadline: .now() + .seconds(5), repeating: .seconds(5))
+            watchdog.setEventHandler { [weak self] in
+                guard let self = self else { return }
+                if !sawDelta {
+                    log.info("waiting for first tokens req_id=\(self.reqId, privacy: .public)")
+                } else {
+                    watchdog.cancel()
+                }
+            }
+            watchdog.resume()
+            // 0 means unlimited; stream until EOS or cancel
+            let effMaxTokens = (maxTokens <= 0) ? Int.max : maxTokens
+            let outTok = try runner.stream(temperature: temperature, maxTokens: effMaxTokens, isCancelled: { [weak self] in
                 return self?.cancelled ?? true
             }, onDelta: { text in
+                if !sawDelta && !text.isEmpty { sawDelta = true }
                 emitter.submit(text)
             }, onToolCall: { [weak self] name, input in
                 guard let self = self else { return }
@@ -183,6 +182,7 @@ final class Session {
                     else { self.sendToolFailure(name: name, error: res.output) }
                 }
             })
+            watchdog.cancel()
             emitter.close()
             self.sendCompleted(inputTokens: inputTokens, outputTokens: UInt64(outTok))
         let durMs = Double(DispatchTime.now().uptimeNanoseconds - self.startNs) / 1_000_000.0

@@ -1,6 +1,7 @@
 // Always use the real GPT-OSS integration (no stub support)
 #import "codexpc_engine.h"
 #include <string.h>
+#include <stdlib.h>
 #include <gpt-oss/functions.h>
 
 struct codexpc_engine {
@@ -18,12 +19,10 @@ int codexpc_engine_open(const char* checkpoint_path, codexpc_engine_t* out_engin
     if (!checkpoint_path || !out_engine) return -1;
     *out_engine = nullptr;
     auto* e = new codexpc_engine();
-    size_t max_batch_tokens = 0;
-    const char* mbt = getenv("CODEXPC_MAX_BATCH_TOKENS");
-    if (mbt && mbt[0] != '\0') {
-        long v = strtol(mbt, NULL, 10);
-        if (v > 0 && v < 65536) { max_batch_tokens = (size_t)v; }
-    }
+    // Enforce stable defaults under LaunchAgent without requiring external envs
+    setenv("GPTOSS_WEIGHTS_PRIVATE", "1", 0);
+    setenv("GPTOSS_DISABLE_MLOCK", "1", 0);
+    size_t max_batch_tokens = 32; // default conservative batch clamp (fixed)
     enum gptoss_status st = gptoss_model_create_from_file(checkpoint_path, &e->model, max_batch_tokens);
     if (st != gptoss_status_success) { delete e; return to_errno(st); }
     st = gptoss_model_get_tokenizer(e->model, &e->tokenizer);

@@ -4,6 +4,7 @@ import codexpcCore
 @main
 struct Main {
     static func main() {
+        // Defaults are now baked into the engine; no runtime env vars required.
         var serviceName = "com.yourorg.codexpc"
         // Simple arg parsing for --service override and optional --foreground flag (no-op)
         var it = CommandLine.arguments.dropFirst().makeIterator()

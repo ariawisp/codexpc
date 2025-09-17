@@ -56,6 +56,13 @@ let package = Package(
             name: "codexpcEngine",
             path: "Sources/codexpcEngine",
             publicHeadersPath: "include",
+            cSettings: {
+                var cs: [CSetting] = [ .headerSearchPath("include") ]
+                if let inc = ProcessInfo.processInfo.environment["GPTOSS_INCLUDE_DIR"], !inc.isEmpty {
+                    cs.append(.unsafeFlags(["-I\(inc)"]))
+                }
+                return cs
+            }(),
             cxxSettings: {
                 var flags: [CXXSetting] = [ .headerSearchPath("include") ]
                 if let inc = ProcessInfo.processInfo.environment["GPTOSS_INCLUDE_DIR"], !inc.isEmpty {

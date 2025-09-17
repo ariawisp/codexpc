@@ -37,7 +37,7 @@ Build and run the CLI:
 
 ```
 cd ../cli-swift
-swift run -c release codexpc-cli --checkpoint /path/to/model.bin --prompt "hello" --temperature 0.0 --max-tokens 64
+swift run -c release codexpc-cli --checkpoint /path/to/model.bin --prompt "hello" --temperature 0.0 --max-tokens 0
 ```
 
 You can also ping health without a model:
@@ -51,18 +51,4 @@ Install locations:
 - Symlink (if possible): `/usr/local/bin/codexpcd`
 - LaunchAgent: `~/Library/LaunchAgents/com.yourorg.codexpc.plist`
 
-## Tool execution (demo)
-
-Tool calls are disabled by default. To enable the demo tools and keep them safe:
-
-- `CODEXPC_ALLOW_TOOLS=1` — enable tool execution
-- `CODEXPC_ALLOWED_TOOLS="echo,upper"` — optional allowlist
-- `CODEXPC_TOOL_TIMEOUT_MS=2000` — per-call timeout (ms)
-- `CODEXPC_TOOL_MAX_OUTPUT_BYTES=8192` — cap output size (bytes)
-
-Testing helpers:
-
-- `CODEXPC_TEST_FORCE_TOOL="name:{\"msg\":\"text\"}"` — force a tool call
-- `CODEXPC_TEST_TOOL_DELAY_MS=50` — simulate a slow tool for timeout testing
-
-Note: Harmony C API is required (no stub). Use `scripts/build-harmony-ffi.sh` before building.
+Note: Harmony C API is required (no stub). Use `scripts/build-harmony-ffi.sh` before building. No runtime environment variables are required; defaults are baked in.

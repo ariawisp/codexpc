@@ -1,12 +1,13 @@
 import Foundation
 import XPC
+import Dispatch
 
 struct Args {
     var service = "com.yourorg.codexpc"
     var checkpoint = ""
     var prompt = ""
     var temperature: Double = 0.0
-    var maxTokens: UInt64 = 128
+    var maxTokens: UInt64 = 0
     var health = false
 }
 
@@ -19,7 +20,7 @@ func parseArgs() -> Args {
         case "--checkpoint": a.checkpoint = it.next() ?? a.checkpoint
         case "--prompt": a.prompt = it.next() ?? a.prompt
         case "--temperature": a.temperature = Double(it.next() ?? "0") ?? 0.0
-        case "--max-tokens": a.maxTokens = UInt64(it.next() ?? "128") ?? 128
+        case "--max-tokens": a.maxTokens = UInt64(it.next() ?? "0") ?? 0
         case "--health": a.health = true
         default: break
         }
@@ -29,7 +30,7 @@ func parseArgs() -> Args {
 
 let args = parseArgs()
 if !args.health && args.checkpoint.isEmpty {
-    fputs("usage: codexpc-cli [--health] --checkpoint <path> [--prompt <text>] [--service <name>] [--temperature <float>] [--max-tokens <n>]\n", stderr)
+    fputs("usage: codexpc-cli [--health] --checkpoint <path> [--prompt <text>] [--service <name>] [--temperature <float>] [--max-tokens <n (0=unlimited)>]\n", stderr)
     exit(2)
 }
 

@@ -1,24 +1,31 @@
 import Foundation
 
 enum ToolExecutor {
-    // Very limited demo tool execution; gated externally by CODEXPC_ALLOW_TOOLS=1
+    // Demo tool execution with no environment variables.
     // Callers should prefer executeEnforced(..) which applies allowlist, timeout and output caps.
+
+    struct Config {
+        // Enable or disable tool execution globally (disabled by default for safety)
+        static var enabled: Bool = false
+        // Optional allowlist. If nil and enabled==true, a safe default set is used.
+        static var allowed: Set<String>? = nil
+        // Policy knobs (test-friendly, not env-driven)
+        static var timeoutMs: Int = 2000
+        static var maxOutputBytes: Int = 8192
+        // Test-only latency injection
+        static var testDelayMs: Int = 0
+        // Default safe tools
+        static let defaultAllowed: Set<String> = ["echo", "upper"]
+    }
 
     // Public convenience used by older paths/tests
     static func execute(name: String, input: String) -> String { executeWithStatus(name: name, input: input).output }
 
     // Central entry that applies allowlist, timeout and output size caps.
     static func executeEnforced(name: String, input: String) -> (output: String, ok: Bool) {
-        // Allowlist gate (optional)
-        if let allow = ProcessInfo.processInfo.environment["CODEXPC_ALLOWED_TOOLS"], !allow.isEmpty {
-            let allowed = Set(allow.split(separator: ",").map { String($0.trimmingCharacters(in: .whitespaces)) })
-            if !allowed.contains(name) {
-                return ("tool not allowed: \(name)", false)
-            }
-        }
-
-        let timeoutMs = configTimeoutMs()
-        let maxBytes = configMaxOutputBytes()
+        guard isAllowed(name) else { return ("tool not allowed: \(name)", false) }
+        let timeoutMs = Config.timeoutMs
+        let maxBytes = Config.maxOutputBytes
 
         // Execute on a background queue and wait with timeout.
         let sem = DispatchSemaphore(value: 0)
@@ -39,17 +46,9 @@ enum ToolExecutor {
 
     // Core implementation: returns output and ok without policy enforcement.
     static func executeWithStatus(name: String, input: String) -> (output: String, ok: Bool) {
-        // Apply allowlist here as well to preserve legacy behavior used by tests
-        if let allow = ProcessInfo.processInfo.environment["CODEXPC_ALLOWED_TOOLS"], !allow.isEmpty {
-            let allowed = Set(allow.split(separator: ",").map { String($0.trimmingCharacters(in: .whitespaces)) })
-            if !allowed.contains(name) {
-                return ("tool not allowed: \(name)", false)
-            }
-        }
+        guard isAllowed(name) else { return ("tool not allowed: \(name)", false) }
         // Optional test hook to simulate tool latency (milliseconds)
-        if let delayStr = ProcessInfo.processInfo.environment["CODEXPC_TEST_TOOL_DELAY_MS"], let ms = Int(delayStr), ms > 0 {
-            usleep(useconds_t(ms * 1000))
-        }
+        if Config.testDelayMs > 0 { usleep(useconds_t(Config.testDelayMs * 1000)) }
         switch name {
         case "echo":
             if input.trimmingCharacters(in: .whitespaces).hasPrefix("{") {
@@ -66,6 +65,12 @@ enum ToolExecutor {
         default:
             return ("unsupported tool: \(name)", false)
         }
+    }
+
+    private static func isAllowed(_ name: String) -> Bool {
+        guard Config.enabled else { return false }
+        if let allowed = Config.allowed { return allowed.contains(name) }
+        return Config.defaultAllowed.contains(name)
     }
 
     private static func firstStringValue(inJson s: String) -> String? {
@@ -93,13 +98,5 @@ enum ToolExecutor {
         return String(decoding: prefixBytes, as: UTF8.self)
     }
 
-    private static func configTimeoutMs() -> Int {
-        if let s = ProcessInfo.processInfo.environment["CODEXPC_TOOL_TIMEOUT_MS"], let v = Int(s), v > 0 { return v }
-        return 2000
-    }
-
-    private static func configMaxOutputBytes() -> Int {
-        if let s = ProcessInfo.processInfo.environment["CODEXPC_TOOL_MAX_OUTPUT_BYTES"], let v = Int(s), v > 0 { return v }
-        return 8192
-    }
+    // No env-based config; values are provided via ToolExecutor.Config
 }

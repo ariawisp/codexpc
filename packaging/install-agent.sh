@@ -49,6 +49,14 @@ echo "Installing binary to $BIN_PATH"
 cp -f "$ROOT_DIR/daemon-swift/.build/release/codexpcd" "$BIN_PATH"
 chmod +x "$BIN_PATH"
 
+# Also install the foreground smoke binary for CLI fallback
+SMOKE_PATH="$DEST_DIR/gptoss-smoke"
+if [ -f "$ROOT_DIR/daemon-swift/.build/release/gptoss-smoke" ]; then
+  echo "Installing gptoss-smoke to $SMOKE_PATH"
+  cp -f "$ROOT_DIR/daemon-swift/.build/release/gptoss-smoke" "$SMOKE_PATH"
+  chmod +x "$SMOKE_PATH"
+fi
+
 # Install runtime resources next to the binary (../lib and ../share/codexpc)
 BASE_DIR="$(cd "$DEST_DIR/.." && pwd)"
 LIB_DIR="$BASE_DIR/lib"
@@ -82,15 +90,6 @@ cat >"$PLIST_DST" <<PLIST
   <array>
     <string>${BIN_PATH}</string>
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>GPTOSS_WEIGHTS_PRIVATE</key>
-    <string>1</string>
-    <key>GPTOSS_DISABLE_MLOCK</key>
-    <string>1</string>
-    <key>CODEXPC_MAX_BATCH_TOKENS</key>
-    <string>32</string>
-  </dict>
   <key>MachServices</key>
   <dict>
     <key>com.yourorg.codexpc</key>
@@ -100,10 +99,6 @@ cat >"$PLIST_DST" <<PLIST
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>StandardOutPath</key>
-  <string>$HOME/Library/Logs/com.yourorg.codexpc.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>$HOME/Library/Logs/com.yourorg.codexpc.err.log</string>
 </dict>
 </plist>
 PLIST
@@ -117,12 +112,4 @@ echo "Done. Service: com.yourorg.codexpc"
 echo "Binary: $BIN_PATH"
 if [ -L "$SYMLINK" ]; then echo "Symlink: $SYMLINK -> $(readlink "$SYMLINK")"; fi
 echo "Check status: launchctl list | grep codexpc"
-echo "Logs: $HOME/Library/Logs/com.yourorg.codexpc.*.log"
-
-# Helpful hints for engine integration
-if [ -z "${GPTOSS_LIB_DIR:-}" ] || [ -z "${GPTOSS_INCLUDE_DIR:-}" ]; then
-  echo "note: GPTOSS_* env vars not set. If link failed earlier, run scripts/build-gptoss-macos.sh and rebuild." >&2
-fi
-if [ -z "${HARMONY_LIB_DIR:-}" ] || [ -z "${HARMONY_INCLUDE_DIR:-}" ]; then
-  echo "note: Harmony C API not built. To enable Harmony formatting, run scripts/build-harmony-ffi.sh and rebuild." >&2
-fi
+echo "Logs (unified log): use 'log show --predicate 'subsystem == \"com.yourorg.codexpc\"' --last 10m --info --debug'"
