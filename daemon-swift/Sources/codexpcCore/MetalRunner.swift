@@ -17,7 +17,7 @@ final class MetalRunner {
             self.engine = entry.eng
             Self.cacheLock.unlock()
             let ptrStr = String(format: "%p", unsafeBitCast(entry.eng, to: Int.self))
-            log.info("engine cache hit ckpt=\(checkpointPath, privacy: .public) eng=\(ptrStr, privacy: .public) ref=\(entry.ref, privacy: .public)")
+            log.debug("engine cache hit ckpt=\(checkpointPath, privacy: .public) eng=\(ptrStr, privacy: .public) ref=\(entry.ref, privacy: .public)")
         } else {
             Self.cacheLock.unlock()
             var e: codexpc_engine_t? = nil
@@ -30,7 +30,7 @@ final class MetalRunner {
             Self.engineCache[checkpointPath] = (eng: handle, ref: 1)
             Self.cacheLock.unlock()
             let ptrStr = String(format: "%p", unsafeBitCast(handle, to: Int.self))
-            log.info("engine open ckpt=\(checkpointPath, privacy: .public) eng=\(ptrStr, privacy: .public) ref=1")
+            log.debug("engine open ckpt=\(checkpointPath, privacy: .public) eng=\(ptrStr, privacy: .public) ref=1")
         }
         var endId: UInt32 = 0
         if let e = self.engine, codexpc_engine_get_end_token_id(e, &endId) == 0 { endToken = endId }
@@ -94,7 +94,7 @@ final class MetalRunner {
     func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void, onToolCall: ((String, String) -> Void)? = nil) throws -> Int {
         guard let e = engine else { return 0 }
         var generated = 0
-        var seed: UInt64 = 0
+        let seed: UInt64 = 0
         let batch = 16
         var tokens = [UInt32](repeating: 0, count: batch)
         var outCount: Int = 0
@@ -115,10 +115,7 @@ final class MetalRunner {
             outCount = 0
             let rc = codexpc_engine_sample(e, temp, seed, Int(batch), &tokens, &outCount)
             if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "sample failed: \(rc)"]) }
-            if !loggedSample {
-                log.info("sample rc=\(rc) out=\(outCount)")
-                loggedSample = true
-            }
+            if !loggedSample { log.info("sample rc=\(rc) out=\(outCount)"); loggedSample = true }
             if outCount == 0 {
                 emptySamples += 1
                 if emptySamples % 10 == 0 { log.debug("sample empty count=\(emptySamples)") }
@@ -171,5 +168,13 @@ final class MetalRunner {
             }
         }
         return generated
+    }
+
+    // Minimal warmup: trigger a tiny sample to compile kernels without emitting logs/deltas
+    func warmup() {
+        guard let e = engine else { return }
+        var toks = [UInt32](repeating: 0, count: 1)
+        var outCount: Int = 0
+        _ = codexpc_engine_sample(e, 0.0, 0, 1, &toks, &outCount)
     }
 }

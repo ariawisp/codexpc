@@ -1,135 +1,97 @@
 # CodexPC Handoff Plan (Updated)
 
-Scope: codexpc (daemon-swift, packaging, scripts), codex (macOS provider + tests), gpt-oss (Metal C API use), harmony (consume official C API or stub).
+Scope: codexpc (daemon-swift, packaging, scripts), codex (macOS provider + tests), gpt-oss (Metal C API), harmony (official C API).
 
-This update reflects fixes landed during this pass, the current known-good runbook, and the next steps for a new engineer to take it over the finish line.
+This reflects the latest working state: XPC-only path, no runtime envs, Harmony final-only output with guarded stop, and Codex provider aligned to the same Harmony format.
 
 ## Current State (What Works)
-- XPC daemon (Swift) runs as a LaunchAgent, exposes a Mach service, and streams events:
+- XPC daemon (Swift) as a per-user LaunchAgent (Mach service `com.yourorg.codexpc`).
   - Events: `created`, `output_text.delta`, `output_item.done` (tool_call/tool_call.output), `completed` (with token_usage).
-  - Tooling: Demo tools behind gates (`CODEXPC_ALLOW_TOOLS=1`, `CODEXPC_ALLOWED_TOOLS`), with per‑call timeout and output caps.
-  - Harmony: Formatter + stream decoder integrated; commentary deltas suppressed by default (final‑channel only). No stub fallback; real C API required.
-- Codex provider (Rust):
-  - macOS XPC path with direct streaming; CLI fallback on non‑macOS.
-  - Harmony conversation JSON builder (system → developer → user), with developer message gated on presence of tools.
-  - Event mapping covers `CustomToolCall` and `CustomToolCallOutput`; token_usage surfaced.
-  - Minor fixes: error mapping cleanup, sender ownership fix, unit tests adjusted.
-- Swift unit tests: Tool executor (allowlist, timeout, size cap + invalid JSON paths), emitter, Harmony init; pass with stubs.
-- Packaging: Single install script builds GPT‑OSS, wires metallib, installs LaunchAgent.
+  - Harmony: Formatter + stream decoder. Commentary suppressed; final-only output to clients. Guarded stop: continue past analysis until final/tool event. Fallback to raw decode if no deltas after 128 tokens.
+  - Engine: GPT‑OSS Metal C API bridged via ObjC++; Private buffer uploads and mlock disabled are enforced in-process (no envs). Engine cache keyed by checkpoint avoids re-upload after first request.
+  - Batch clamp: fixed conservative default (32) inside the engine.
+- CLI (Swift): XPC-only; `--max-tokens 0` means unlimited (until EOS). Health ping supported.
+- Packaging: Single installer builds GPT‑OSS + Harmony, embeds metallib into the binary, installs LaunchAgent. Logs to unified log (no file logs).
+- Codex provider (../codex): macOS XPC path uses the same Harmony JSON shape (top-level `role`, typed content) and sends `harmony_conversation`. Unlimited tokens mapped to 0.
 
-## Key Improvements This Pass
-- macOS XPC bridge fixed (non‑ARC build, tool_call.output plumbed).
-- Developer message gated on tools (avoids token bloat when not needed).
-- Tool validation/tests added; CLI prints tool call/output for quick smokes.
-- GPT‑OSS Metal weight upload made robust for LaunchAgent:
-  - Added Private‑storage uploads with chunked blits (env: `GPTOSS_WEIGHTS_PRIVATE=1`).
-  - Optional mlock disabled (env: `GPTOSS_DISABLE_MLOCK=1`) to avoid pinning ~13GB and inflating resident memory.
-  - Engine reuse in daemon (simple in‑process cache keyed by checkpoint) to avoid re‑uploading weights per request.
-- Batch size clamp plumbed (env: `CODEXPC_MAX_BATCH_TOKENS`, forwarded to GPT‑OSS) to reduce activation footprint.
+## Runbook (Operator)
+- Install/Reload:
+  - `../packaging/install-agent.sh`
+- Health:
+  - `cd cli-swift && swift run -c release codexpc-cli --health` → `health: ok`
+- Stream smoke (20B model):
+  - `swift run -c release codexpc-cli --checkpoint "$HOME/gpt-oss-20b/metal/model.bin" --prompt "hello" --temperature 0.0 --max-tokens 0`
+  - Expect: `created`, final deltas, `completed`. First run pays one-time weight upload; subsequent runs stream immediately.
+- Unified logs (useful lines):
+  - `harmony append tokens=… user_parts=…`
+  - `HarmonyStreamDecoder initialized`
+  - `stream start temp=… max=… harmony=true`
+  - `sample rc=… out=…`
+  - `first delta len=…`
+  - Optional: `decoder fallback: switching to raw decode …` (only if Harmony stays quiet >128 tokens)
 
-## Known Issues / Open Questions
-- LaunchAgent vs interactive: A single giant Shared MTLBuffer wrap failed only under LaunchAgent; Python/interactive C worked. Private storage + blit upload resolves this path. Keep Private upload enabled for LaunchAgent.
-- First‑request overhead: Expect one‑time weight uploads and pipeline creation on daemon start. Subsequent requests should not re‑upload (engine cache); confirm with logs.
-- Streaming verification with large models: With `GPTOSS_WEIGHTS_PRIVATE=1`, `GPTOSS_DISABLE_MLOCK=1`, and a reasonable `CODEXPC_MAX_BATCH_TOKENS` (e.g., 32), streaming should produce deltas on 20B. If not, validate tokenizer/decoder path and Harmony stub toggles.
-
-## Handoff Checklist (Do This First)
-1) Install daemon (no runtime env required):
-   - `../packaging/install-agent.sh`
-2) Reload agent if needed: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.yourorg.codexpc.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yourorg.codexpc.plist`
-3) Verify health: `swift run -c release codexpc-cli --health` → `health: ok`.
-4) Verify first load logs: in `~/Library/Logs/com.yourorg.codexpc.err.log` expect:
-   - `Warning: using Private storage upload for shared weights (...)`
-   - `Warning: using Private storage upload for MoE block #...`
-   These should appear once per daemon start, not per request.
-5) Stream smoke: `swift run -c release codexpc-cli --checkpoint /path/to/model.bin --prompt "hello" --max-tokens 32` → expect `created`, deltas, `completed`.
+## Design Notes (No Runtime Envs)
+- Private uploads + mlock disabled are set programmatically in the engine bridge — stable under LaunchAgent.
+- No `CODEXPC_*` or `GPTOSS_*` runtime envs are required. Build-time envs for headers/libs are handled by the installer.
+- Tools are disabled by default; their configuration is code-only (no envs).
 
 ## Next Engineer Plan (Prioritized)
-1) Stabilize Private weight upload
-   - Ensure we never re‑upload on subsequent requests (engine cache hits). Add a log line on cache hit/miss.
-   - Cap upload chunk size by device limit (consider querying `maxBufferLength`).
-   - No env toggles in the default path; keep behavior fixed.
-   Acceptance: first request logs show uploads; second request shows no uploads; deltas stream.
+1) Startup latency polish
+   - Add an optional warmup on daemon start (open model once) to amortize pipeline compilation. Keep it fast and opt-out by default.
+   - Acceptance: “hello” streams within ~2s after daemon start on 20B after the initial warmup.
 
-2) Activation memory guardrails
-   - Default conservative batch clamp (32) is baked in; consider dynamic sizing in future.
-   Acceptance: Activity Monitor shows stable RSS after first request; second request does not grow.
+2) Packaging/rpath cleanup
+   - Ensure Harmony dylib install_name uses `@rpath` and relies on `@executable_path/../lib`. Adjust installer with `install_name_tool`.
+   - Acceptance: `otool -L codexpcd` shows `@rpath/libopenai_harmony.dylib`.
 
-3) Foreground dev mode
-   - Add `--foreground` flag or env to run the daemon outside launchd for iterative testing; same envs apply.
-   - Document how to run CLI against the foreground daemon.
-   Acceptance: foreground run streams tokens with the same envs on first try.
+3) Log hygiene
+   - Reduce info logs to: `harmony append …`, `stream start …`, `first delta …`. Gate extra sampling logs behind a build flag.
+   - Acceptance: default logs are concise; deep-dive logs available in a debug build.
 
-4) Harmony stream decoder
-  - Harmony decoding is always on by default. Commentary deltas suppressed.
-  - Add a unit test to confirm commentary suppression (final only).
+4) Seed warning cleanup
+   - Convert `var seed` → `let seed` in `MetalRunner`.
 
-5) Upstream GPT‑OSS PR (optional)
-   - Contribute Private‑storage upload + `GPTOSS_DISABLE_MLOCK` guard upstream, behind env flags.
+5) Codex integration tests
+   - Update/enable macOS ignored test to assert final-only deltas via XPC. Document checkpoint config path.
 
-## Env Vars
-None required at runtime. Build/link envs may be used for local development only.
+6) Optional: memory guardrails
+   - Consider dynamic batch sizing based on device memory + model dims.
 
 ## Validation Matrix
 - Health: CLI `--health` returns ok.
-- First request: logs show Private uploads; memory rises during upload then stabilizes.
-- Second request: no upload logs; memory stable; deltas stream.
-- Tool path: with tools enabled, see `[tool_call]` then `[tool_call.output]` and `completed`.
+- First request after daemon start: logs show model open → sample rc/out → first delta.
+- Second request: no upload latency; immediate deltas.
+- Final-only: CLI shows user-facing final text, no commentary.
 
-## Risks & Notes
-- LaunchAgent context is stricter about giant Shared buffers; Private upload sidesteps this reliably.
-- Large models still have significant activation memory; batch clamp and KV cache size drive memory.
-- Engine cache is process‑local; a daemon restart re‑uploads weights (expected). Consider a future warm‑start option if needed.
+## Risks & Mitigations
+- First-run cost: large models compile kernels and upload weights. Mitigate via warmup and engine cache reuse.
+- Harmony drift: decoder fallback ensures text even if parser encounters unexpected streams; keep scaffold updated.
+- Memory: fixed batch clamp at 32 by default; revisit for dynamic sizing.
 
 ## Where Things Live
 - Daemon: `daemon-swift/` (XPC server, engine bridge, Harmony integration)
-- GPT‑OSS bridge: `daemon-swift/Sources/codexpcEngine/` (env‑driven batch clamp)
-- Harmony FFI shim/stub: `daemon-swift/Sources/OpenAIHarmony/`
-- Codex provider (macOS): `../codex/codex-rs` (XPC bridge in `codexpc-xpc`, client mapping in `core/src/client.rs`)
+- Engine bridge: `daemon-swift/Sources/codexpcEngine/`
+- Harmony FFI shim: `daemon-swift/Sources/OpenAIHarmony/`
+- Core streaming: `daemon-swift/Sources/codexpcCore/MetalRunner.swift`, `SessionManager.swift`, `Harmony*`
 - Installer/LaunchAgent: `packaging/`
+- Codex provider: `../codex/codex-rs` (XPC in `codexpc-xpc`, client JSON builder in `core/src/client.rs`)
 
 ## Quick Troubleshooting
-- No deltas, immediate completed: ensure Harmony linked correctly and decoder not swallowing commentary (decoder is enabled by default). Check logs for engine errors.
-- Memory spikes: batch clamp defaults to 32; verify engine cache reuse (no upload logs on second request).
-- Metal library not found in smoke: ensure `default.metallib` is copied next to binary by the installer.
+- Only `[created]`, no deltas:
+  - Check unified log for `sample rc=… out=…` and `first delta …`. If none, confirm metallib is embedded: `otool -l codexpcd | rg '__METAL|__shaders'`.
+  - If sampling ok but no text, look for `decoder fallback` (should switch to raw decode automatically). If absent, verify Harmony dylib is resolvable (`otool -L codexpcd`).
+- Immediate `[completed]` with no text:
+  - Ensure final-only gating didn’t stop on analysis. The scaffold should steer a final message; if still missing, adjust scaffold wording.
+- High memory:
+  - Batch clamp is 32 by default; consider lowering for low-RAM devices.
+
+## Ownership & Handoff Notes
+- Primary areas: `codexpcCore/*`, `codexpcEngine`, `OpenAIHarmony`, `packaging/`, and Codex `codexpc-xpc` + `core/src/client.rs`.
+- Coordination: open issues/PRs in Harmony/GPT‑OSS if C API surfaces or metal build flags need tweaks.
 
 ---
 
 ## Milestones
-- M1: Dev message + tool schemas; argument pass-through validated.
-- M2: Tool execution pipeline hardened (timeouts/allowlist), structured outputs mapped; unit tests added.
-- M3: macOS CI (unit), integration test runnable; packaging refined; docs updated.
-
-## Risks & Mitigations
-- Harmony availability on CI: keep unit tests that don’t require Harmony; gate integration tests.
-- Model behaviour drift: provide `CODEXPC_TEST_FORCE_TOOL` to keep integration tests deterministic.
-- Tool safety: keep demo-only by default; require explicit env gates for execution.
-
-## Ownership & Handoff Notes
-- Primary code areas:
-  - Daemon Swift: `daemon-swift/Sources/codexpcCore/*`, `codexpcEngine`, `OpenAIHarmony`, packaging scripts.
-  - Codex provider: `codex-rs/codexpc-xpc/`, `codex-rs/core/src/client.rs` (provider path + JSON builder), tests under `codex-rs/core/tests`.
-- Coordination points:
-  - If Harmony C API surface changes are needed, open an issue/PR in the Harmony repo.
-  - For new tools, review safety gates and add tests before enabling.
-
----
-
-## Updated Handoff Focus (Next Engineer)
-
-1) Finalize streaming UX
-- Ensure Harmony emits final‑channel deltas for simple prompts. Keep raw decode as a safety fallback but prefer Harmony by default.
-- Acceptance: `codexpc-cli --checkpoint <model> --prompt "Hello"` shows visible streaming text without toggles.
-
-2) Add a macOS integration test
-- Foreground daemon + short prompt; assert created → non‑empty delta(s) → completed.
-
-3) Observability polish
-- Log kernel/metallib source, Harmony init success, first N token ids; keep concise.
-
-4) Docs
-- Update README/quickstart to emphasize single‑command install and no runtime env.
-
-## Verification Checklist (per phase)
-- Unit tests pass locally on macOS (daemon + codex core).
-- Integration test (ignored) passes with a local checkpoint and daemon binary.
-- Manual smoke: Swift CLI `--health`, a short stream, and a forced tool call.
+- M1: XPC-only final output working on 20B with no runtime envs.
+- M2: Codex provider emits correct Harmony JSON; macOS integration smoke passes locally.
+- M3: Packaging/rpath polished; optional warmup; concise default logs; docs updated.

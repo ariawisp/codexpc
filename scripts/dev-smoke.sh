@@ -2,20 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")"/.. && pwd)"
+CHECKPOINT="${CHECKPOINT:-$HOME/gpt-oss-20b/metal/model.bin}"
 
-echo "Building daemon..."
-(cd "$ROOT/daemon-swift" && swift build -c debug)
+echo "Installing/Reloading LaunchAgent..."
+"$ROOT/packaging/install-agent.sh"
 
-echo "Starting daemon in background..."
-"$ROOT/daemon-swift/.build/debug/codexpcd" &
-DAEMON_PID=$!
-trap 'kill $DAEMON_PID || true' EXIT
+echo "Health check..."
+(cd "$ROOT/cli-swift" && swift run -c release codexpc-cli --health)
 
-sleep 1
-
-echo "Building CLI..."
-(cd "$ROOT/cli-swift" && swift build -c release)
-
-echo "Running CLI..."
-"$ROOT/cli-swift/.build/release/codexpc-cli" --checkpoint "/path/to/model.bin" --prompt "hello"
-
+echo "Smoke stream (checkpoint: $CHECKPOINT)..."
+(cd "$ROOT/cli-swift" && swift run -c release codexpc-cli --checkpoint "$CHECKPOINT" --prompt "hello" --temperature 0.0 --max-tokens 0)

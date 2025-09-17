@@ -29,7 +29,7 @@ final class HarmonyStreamDecoder {
             throw NSError(domain: "codexpc", code: Int(stp.rawValue), userInfo: [NSLocalizedDescriptionKey: "harmony parser init failed: \(msg)"])
         }
         self.parser = p
-        log.info("HarmonyStreamDecoder initialized")
+        log.debug("HarmonyStreamDecoder initialized")
 
         // Load assistant action stop tokens (e.g., <|call|>, <|return|>)
         var toks = HarmonyOwnedU32Array(data: nil, len: 0)

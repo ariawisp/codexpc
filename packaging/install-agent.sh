@@ -64,9 +64,19 @@ SHARE_DIR="$BASE_DIR/share/codexpc"
 mkdir -p "$LIB_DIR" "$SHARE_DIR"
 if [ -n "${HARMONY_LIB_DIR:-}" ] && [ -f "$HARMONY_LIB_DIR/libopenai_harmony.dylib" ]; then
   cp -f "$HARMONY_LIB_DIR/libopenai_harmony.dylib" "$LIB_DIR/"
+  # Ensure the Harmony dylib uses @rpath for install_name so the executable can find it via rpath
+  install_name_tool -id "@rpath/libopenai_harmony.dylib" "$LIB_DIR/libopenai_harmony.dylib" || true
 fi
 if [ -n "${GPTOSS_LIB_DIR:-}" ] && [ -f "$GPTOSS_LIB_DIR/default.metallib" ]; then
   cp -f "$GPTOSS_LIB_DIR/default.metallib" "$SHARE_DIR/default.metallib"
+fi
+
+# Optional warmup config: if a conventional checkpoint exists, seed a warmup-checkpoint file
+ETC_DIR="$BASE_DIR/etc"
+mkdir -p "$ETC_DIR"
+DEFAULT_CKPT="$HOME/gpt-oss-20b/metal/model.bin"
+if [ -f "$DEFAULT_CKPT" ]; then
+  echo "$DEFAULT_CKPT" >"$ETC_DIR/warmup-checkpoint"
 fi
 
 # Create a convenience symlink if possible
@@ -108,8 +118,19 @@ launchctl unload "$PLIST_DST" 2>/dev/null || true
 launchctl load -w "$PLIST_DST"
 launchctl start com.yourorg.codexpc || true
 
+# Adjust the binary's reference to Harmony dylib to use @rpath if needed
+if otool -L "$BIN_PATH" | rg -q "libopenai_harmony"; then
+  OLD_REF=$(otool -L "$BIN_PATH" | awk '/libopenai_harmony/ {print $1; exit}')
+  if [ -n "$OLD_REF" ] && [ "$OLD_REF" != "@rpath/libopenai_harmony.dylib" ]; then
+    echo "Rewriting Harmony dylib reference in codexpcd: $OLD_REF -> @rpath/libopenai_harmony.dylib"
+    install_name_tool -change "$OLD_REF" "@rpath/libopenai_harmony.dylib" "$BIN_PATH" || true
+  fi
+fi
+
 echo "Done. Service: com.yourorg.codexpc"
 echo "Binary: $BIN_PATH"
 if [ -L "$SYMLINK" ]; then echo "Symlink: $SYMLINK -> $(readlink "$SYMLINK")"; fi
 echo "Check status: launchctl list | grep codexpc"
 echo "Logs (unified log): use 'log show --predicate 'subsystem == \"com.yourorg.codexpc\"' --last 10m --info --debug'"
+echo "Harmony dylib ref: $(otool -L "$BIN_PATH" | rg 'libopenai_harmony' -n || true)"
+echo "Verify metallib embedded: otool -l \"$BIN_PATH\" | rg '__METAL|__shaders'"

@@ -13,12 +13,12 @@ public final class XpcServer {
     }
 
     public func run() {
-        log.info("Starting XPC service: \(self.serviceName, privacy: .public)")
+        log.debug("Starting XPC service: \(self.serviceName, privacy: .public)")
 
         let conn = xpc_connection_create_mach_service(self.serviceName, nil, UInt64(XPC_CONNECTION_MACH_SERVICE_LISTENER))
         xpc_connection_set_event_handler(conn) { client in
             let pid = xpc_connection_get_pid(client)
-            log.info("client connected pid=\(pid)")
+            log.debug("client connected pid=\(pid)")
             xpc_connection_set_event_handler(client) { event in
                 Self.handleEvent(connection: client, event: event)
             }

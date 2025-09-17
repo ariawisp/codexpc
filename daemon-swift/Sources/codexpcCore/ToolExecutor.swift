@@ -1,19 +1,19 @@
 import Foundation
 
-enum ToolExecutor {
+public enum ToolExecutor {
     // Demo tool execution with no environment variables.
     // Callers should prefer executeEnforced(..) which applies allowlist, timeout and output caps.
 
-    struct Config {
+    public struct Config {
         // Enable or disable tool execution globally (disabled by default for safety)
-        static var enabled: Bool = false
+        public static var enabled: Bool = false
         // Optional allowlist. If nil and enabled==true, a safe default set is used.
         static var allowed: Set<String>? = nil
         // Policy knobs (test-friendly, not env-driven)
-        static var timeoutMs: Int = 2000
-        static var maxOutputBytes: Int = 8192
+        public static var timeoutMs: Int = 2000
+        public static var maxOutputBytes: Int = 8192
         // Test-only latency injection
-        static var testDelayMs: Int = 0
+        public static var testDelayMs: Int = 0
         // Default safe tools
         static let defaultAllowed: Set<String> = ["echo", "upper"]
     }

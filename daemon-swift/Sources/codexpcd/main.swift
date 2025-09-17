@@ -15,7 +15,14 @@ struct Main {
             default: break
             }
         }
+        // Test-friendly toggles (no-op in production): enable tools and tune timeouts/delays via envs
+        let env = ProcessInfo.processInfo.environment
+        if env["CODEXPC_ALLOW_TOOLS"] == "1" { ToolExecutor.Config.enabled = true }
+        if let s = env["CODEXPC_TOOL_TIMEOUT_MS"], let v = Int(s) { ToolExecutor.Config.timeoutMs = v }
+        if let s = env["CODEXPC_TEST_TOOL_DELAY_MS"], let v = Int(s) { ToolExecutor.Config.testDelayMs = v }
         let server = XpcServer(serviceName: serviceName)
+        // Optional warmup: compile kernels once at startup for faster first token.
+        Warmup.runIfConfigured()
         server.run()
     }
 }

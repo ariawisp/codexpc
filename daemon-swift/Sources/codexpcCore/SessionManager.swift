@@ -12,7 +12,7 @@ final class SessionManager {
     private let lock = NSLock()
 
     func handleCreate(connection: xpc_connection_t, req: XpcMessage, reqId: String) {
-        log.info("create session req_id=\(reqId, privacy: .public)")
+        log.debug("create session req_id=\(reqId, privacy: .public)")
         lock.lock()
         if sessions.count >= Self.maxSessions {
             lock.unlock()
@@ -37,7 +37,7 @@ final class SessionManager {
                 set.remove(rid)
                 if set.isEmpty { self.connToReqs.removeValue(forKey: cid) } else { self.connToReqs[cid] = set }
             }
-            log.info("session finished req_id=\(rid, privacy: .public)")
+            log.debug("session finished req_id=\(rid, privacy: .public)")
         }
         sessions[reqId] = s
         let cid: UInt = unsafeBitCast(connection, to: UInt.self)
@@ -52,7 +52,7 @@ final class SessionManager {
     func handleCancel(reqId: String) {
         lock.lock(); defer { lock.unlock() }
         sessions[reqId]?.cancel()
-        log.info("cancel signaled req_id=\(reqId, privacy: .public)")
+        log.debug("cancel signaled req_id=\(reqId, privacy: .public)")
     }
 
     func cancelAll(forConnection connection: xpc_connection_t) {
@@ -60,7 +60,7 @@ final class SessionManager {
         lock.lock(); let reqs = connToReqs[cid] ?? []; lock.unlock()
         for rid in reqs { handleCancel(reqId: rid) }
         lock.lock(); connToReqs.removeValue(forKey: cid); lock.unlock()
-        log.info("cancelled all sessions for connection cid=\(cid)")
+        log.debug("cancelled all sessions for connection cid=\(cid)")
     }
 }
 
@@ -103,7 +103,7 @@ final class Session {
         if let sampling = req.dict("sampling") { temperature = Float(xpc_dictionary_get_double(sampling, "temperature")) }
         if let tflat = req.double("temperature") { temperature = Float(tflat) }
 
-        log.info("session start req_id=\(self.reqId, privacy: .public) ckpt=\(checkpoint, privacy: .public) temp=\(temperature, privacy: .private(mask: .hash)) max_tokens=\(maxTokens)")
+        log.debug("session start req_id=\(self.reqId, privacy: .public) ckpt=\(checkpoint, privacy: .public) temp=\(temperature, privacy: .private(mask: .hash)) max_tokens=\(maxTokens)")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -155,12 +155,29 @@ final class Session {
             }
             emitter.start()
             var sawDelta = false
+            // Test hook: force a single tool call/output if requested via env.
+            if let force = ProcessInfo.processInfo.environment["CODEXPC_TEST_FORCE_TOOL"], !force.isEmpty {
+                var name = "echo"
+                var input = "{}"
+                if let idx = force.firstIndex(of: ":") {
+                    name = String(force[..<idx])
+                    input = String(force[force.index(after: idx)...])
+                } else {
+                    input = force
+                }
+                self.sendToolCall(name: name, input: input)
+                if self.allowTools {
+                    let res = ToolExecutor.executeEnforced(name: name, input: input)
+                    if res.ok { self.sendToolOutput(name: name, output: res.output) }
+                    else { self.sendToolFailure(name: name, error: res.output) }
+                }
+            }
             let watchdog = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
             watchdog.schedule(deadline: .now() + .seconds(5), repeating: .seconds(5))
             watchdog.setEventHandler { [weak self] in
                 guard let self = self else { return }
                 if !sawDelta {
-                    log.info("waiting for first tokens req_id=\(self.reqId, privacy: .public)")
+                    log.debug("waiting for first tokens req_id=\(self.reqId, privacy: .public)")
                 } else {
                     watchdog.cancel()
                 }
@@ -186,7 +203,7 @@ final class Session {
             emitter.close()
             self.sendCompleted(inputTokens: inputTokens, outputTokens: UInt64(outTok))
         let durMs = Double(DispatchTime.now().uptimeNanoseconds - self.startNs) / 1_000_000.0
-        log.info("session duration_ms=\(durMs, privacy: .public) req_id=\(self.reqId, privacy: .public)")
+        log.debug("session duration_ms=\(durMs, privacy: .public) req_id=\(self.reqId, privacy: .public)")
         self.onFinish(self.reqId)
     }
 
