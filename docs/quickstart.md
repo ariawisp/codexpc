@@ -46,6 +46,13 @@ You can also ping health without a model:
 swift run -c release codexpc-cli --health
 ```
 
+To verify Harmony/encoding metadata exposed by the daemon, you can send a handshake request using the Codex CLI (from the sibling repo):
+
+```
+export CODEXPC_DEBUG_HANDSHAKE=1
+codex "hello"
+```
+
 Install locations:
 - Binary: `/opt/codexpc/bin/codexpcd` (fallback: `~/.local/codexpc/bin/codexpcd`)
 - Symlink (if possible): `/usr/local/bin/codexpcd`

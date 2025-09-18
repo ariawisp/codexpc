@@ -9,6 +9,7 @@ struct Args {
     var temperature: Double = 0.0
     var maxTokens: UInt64 = 0
     var health = false
+    var handshake = false
 }
 
 func parseArgs() -> Args {
@@ -22,6 +23,7 @@ func parseArgs() -> Args {
         case "--temperature": a.temperature = Double(it.next() ?? "0") ?? 0.0
         case "--max-tokens": a.maxTokens = UInt64(it.next() ?? "0") ?? 0
         case "--health": a.health = true
+        case "--handshake": a.handshake = true
         default: break
         }
     }
@@ -29,8 +31,8 @@ func parseArgs() -> Args {
 }
 
 let args = parseArgs()
-if !args.health && args.checkpoint.isEmpty {
-    fputs("usage: codexpc-cli [--health] --checkpoint <path> [--prompt <text>] [--service <name>] [--temperature <float>] [--max-tokens <n (0=unlimited)>]\n", stderr)
+if !(args.health || args.handshake) && args.checkpoint.isEmpty {
+    fputs("usage: codexpc-cli [--health] [--handshake] --checkpoint <path> [--prompt <text>] [--service <name>] [--temperature <float>] [--max-tokens <n (0=unlimited)>]\n", stderr)
     exit(2)
 }
 
@@ -43,6 +45,33 @@ xpc_connection_set_event_handler(conn) { ev in
         switch typ {
         case "health.ok":
             fputs("health: ok\n", stdout)
+            exit(0)
+        case "handshake.ok":
+            var dict: [String: Any] = [:]
+            if let enc = xpc_dictionary_get_string(ev, "encoding_name") { dict["encoding_name"] = String(cString: enc) }
+            if let st = xpc_dictionary_get_value(ev, "special_tokens"), xpc_get_type(st) == XPC_TYPE_ARRAY {
+                var arr: [String] = []
+                _ = xpc_array_apply(st) { (_, v) -> Bool in
+                    if xpc_get_type(v) == XPC_TYPE_STRING, let p = xpc_string_get_string_ptr(v) {
+                        arr.append(String(cString: p))
+                    }
+                    return true
+                }
+                dict["special_tokens"] = arr
+            }
+            if let sta = xpc_dictionary_get_value(ev, "stop_tokens_for_assistant_actions"), xpc_get_type(sta) == XPC_TYPE_ARRAY {
+                var arr: [UInt64] = []
+                _ = xpc_array_apply(sta) { (_, v) -> Bool in
+                    if xpc_get_type(v) == XPC_TYPE_UINT64 { arr.append(xpc_uint64_get_value(v)) }
+                    return true
+                }
+                dict["stop_tokens_for_assistant_actions"] = arr
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]), let s = String(data: data, encoding: .utf8) {
+                fputs("\n\(s)\n", stdout)
+            } else {
+                fputs("handshake: ok\n", stdout)
+            }
             exit(0)
         case "created":
             fputs("[created]\n", stdout)
@@ -68,7 +97,7 @@ xpc_connection_set_event_handler(conn) { ev in
                     fputs("\n[tool_call.output] name=\(name) status=\(status) output=\(output)\n", stdout)
                 }
             }
-        case "error":
+        case "error", "handshake.error":
             let code = xpc_dictionary_get_string(ev, "code").map { String(cString: $0) } ?? ""
             let msg = xpc_dictionary_get_string(ev, "message").map { String(cString: $0) } ?? ""
             fputs("error: \(code): \(msg)\n", stderr)
@@ -83,10 +112,10 @@ xpc_connection_resume(conn)
 let msg = xpc_dictionary_create(nil, nil, 0)
 xpc_dictionary_set_string(msg, "service", args.service)
 xpc_dictionary_set_uint64(msg, "proto_version", 1)
-xpc_dictionary_set_string(msg, "type", args.health ? "health" : "create")
+xpc_dictionary_set_string(msg, "type", args.health ? "health" : (args.handshake ? "handshake" : "create"))
 xpc_dictionary_set_string(msg, "req_id", reqId)
 xpc_dictionary_set_string(msg, "model", "gpt-oss")
-if !args.health {
+if !(args.health || args.handshake) {
     xpc_dictionary_set_string(msg, "checkpoint_path", args.checkpoint)
     // Prefer sending the prompt as a user input to encourage 'final' channel output
     if !args.prompt.isEmpty {

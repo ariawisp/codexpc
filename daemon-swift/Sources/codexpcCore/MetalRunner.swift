@@ -95,6 +95,25 @@ final class MetalRunner {
         return try formatter.appendToolMessage(to: e, toolName: toolName, output: output)
     }
 
+    func appendMessages(_ messages: [HarmonyFormatter.HarmonyMsg], formatter: HarmonyFormatter, toolsJson: String? = nil, primeWith decoder: HarmonyStreamDecoder? = nil) throws -> Int {
+        guard let e = engine else { return 0 }
+        return try formatter.appendMessages(to: e, messages: messages, toolsJson: toolsJson, primeParser: decoder?.rawParser)
+    }
+
+    func appendTokens(_ tokens: [UInt32]) throws -> Int {
+        guard let e = engine else { return 0 }
+        if tokens.isEmpty { return 0 }
+        var toks = tokens
+        let rc = toks.withUnsafeMutableBufferPointer { bp -> Int32 in
+            if let base = bp.baseAddress {
+                return codexpc_engine_append_tokens(e, base, bp.count)
+            }
+            return 0
+        }
+        if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "append tokens failed: \(rc)"]) }
+        return tokens.count
+    }
+
     // Streams tokens, calling onDelta with decoded text, and returns number of tokens generated
     func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void, onToolCall: ((String, String, String) -> Void)? = nil, using decoder: HarmonyStreamDecoder? = nil) throws -> Int {
         guard let e = engine else { return 0 }
