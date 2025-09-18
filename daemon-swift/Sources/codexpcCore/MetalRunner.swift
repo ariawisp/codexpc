@@ -1,9 +1,69 @@
 import Foundation
 import codexpcEngine
 import os
+import Darwin
+
+// Function pointer types for dynamic engine loading
+typealias fn_open_t = @convention(c) (UnsafePointer<CChar>?, UnsafeMutablePointer<codexpc_engine_t?>?) -> Int32
+typealias fn_close_t = @convention(c) (codexpc_engine_t?) -> Void
+typealias fn_reset_t = @convention(c) (codexpc_engine_t?) -> Int32
+typealias fn_append_tokens_t = @convention(c) (codexpc_engine_t?, UnsafePointer<UInt32>?, Int) -> Int32
+typealias fn_append_chars_t = @convention(c) (codexpc_engine_t?, UnsafePointer<CChar>?, Int, UnsafeMutablePointer<Int>?) -> Int32
+typealias fn_sample_t = @convention(c) (codexpc_engine_t?, Float, UInt64, Int, UnsafeMutablePointer<UInt32>?, UnsafeMutablePointer<Int>?) -> Int32
+typealias fn_decode_token_t = @convention(c) (codexpc_engine_t?, UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutablePointer<Int>?) -> Int32
+typealias fn_get_end_token_id_t = @convention(c) (codexpc_engine_t?, UnsafeMutablePointer<UInt32>?) -> Int32
+typealias fn_get_special_token_id_t = @convention(c) (codexpc_engine_t?, Int32, UnsafeMutablePointer<UInt32>?) -> Int32
+
+struct EngineCalls {
+    let open: fn_open_t
+    let close: fn_close_t
+    let reset: fn_reset_t
+    let append_tokens: fn_append_tokens_t
+    let append_chars: fn_append_chars_t
+    let sample: fn_sample_t
+    let decode_token: fn_decode_token_t
+    let get_end_token_id: fn_get_end_token_id_t
+    let get_special_token_id: fn_get_special_token_id_t
+}
+
+private func defaultEngineCalls() -> EngineCalls {
+    return EngineCalls(
+        open: codexpc_engine_open,
+        close: codexpc_engine_close,
+        reset: codexpc_engine_reset,
+        append_tokens: codexpc_engine_append_tokens,
+        append_chars: codexpc_engine_append_chars,
+        sample: codexpc_engine_sample,
+        decode_token: codexpc_engine_decode_token,
+        get_end_token_id: codexpc_engine_get_end_token_id,
+        get_special_token_id: codexpc_engine_get_special_token_id
+    )
+}
+
+final class DynamicEngineLoader {
+    static func load(path: String) -> EngineCalls? {
+        guard let handle = dlopen(path, RTLD_NOW | RTLD_LOCAL) else { return nil }
+        func sym<T>(_ name: String, as type: T.Type) -> T? {
+            guard let raw = dlsym(handle, name) else { return nil }
+            return unsafeBitCast(raw, to: type)
+        }
+        guard let fOpen = sym("codexpc_engine_open", as: fn_open_t.self),
+              let fClose = sym("codexpc_engine_close", as: fn_close_t.self),
+              let fReset = sym("codexpc_engine_reset", as: fn_reset_t.self),
+              let fAppendTokens = sym("codexpc_engine_append_tokens", as: fn_append_tokens_t.self),
+              let fAppendChars = sym("codexpc_engine_append_chars", as: fn_append_chars_t.self),
+              let fSample = sym("codexpc_engine_sample", as: fn_sample_t.self),
+              let fDecode = sym("codexpc_engine_decode_token", as: fn_decode_token_t.self),
+              let fEnd = sym("codexpc_engine_get_end_token_id", as: fn_get_end_token_id_t.self),
+              let fSpec = sym("codexpc_engine_get_special_token_id", as: fn_get_special_token_id_t.self)
+        else { return nil }
+        return EngineCalls(open: fOpen, close: fClose, reset: fReset, append_tokens: fAppendTokens, append_chars: fAppendChars, sample: fSample, decode_token: fDecode, get_end_token_id: fEnd, get_special_token_id: fSpec)
+    }
+}
 
 final class MetalRunner {
     private var engine: codexpc_engine_t? = nil
+    private static var calls: EngineCalls = defaultEngineCalls()
     private static var cacheLock = NSLock()
     private static var engineCache: [String: (eng: codexpc_engine_t, ref: Int)] = [:]
     private var endToken: UInt32 = 0
@@ -20,9 +80,22 @@ final class MetalRunner {
             log.debug("engine cache hit ckpt=\(checkpointPath, privacy: .public) eng=\(ptrStr, privacy: .public) ref=\(entry.ref, privacy: .public)")
         } else {
             Self.cacheLock.unlock()
+            // Optional dynamic engine: load from CODEXPC_ENGINE_LIB if set
+            if let libPath = getenv("CODEXPC_ENGINE_LIB") {
+                let s = String(cString: libPath)
+                if let dyn = DynamicEngineLoader.load(path: s) {
+                    Self.calls = dyn
+                    log.info("using dynamic engine lib=\(s, privacy: .public)")
+                } else {
+                    log.error("failed to load dynamic engine from \(s, privacy: .public); falling back to default")
+                    Self.calls = defaultEngineCalls()
+                }
+            } else {
+                Self.calls = defaultEngineCalls()
+            }
             var e: codexpc_engine_t? = nil
             let rc = checkpointPath.withCString { cpath in
-                codexpc_engine_open(cpath, &e)
+                Self.calls.open(cpath, &e)
             }
             guard rc == 0, let handle = e else { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "engine open failed: \(rc)"]) }
             self.engine = handle
@@ -53,13 +126,13 @@ final class MetalRunner {
             }
         } else {
             Self.cacheLock.unlock()
-            codexpc_engine_close(e)
+            Self.calls.close(e)
         }
     }
 
     func reset() throws {
         guard let e = engine else { return }
-        let rc = codexpc_engine_reset(e)
+        let rc = Self.calls.reset(e)
         if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "reset failed: \(rc)"]) }
     }
 
@@ -68,7 +141,7 @@ final class MetalRunner {
         guard let e = engine else { return 0 }
         var appended: Int = 0
         let rc = text.withCString { cstr in
-            codexpc_engine_append_chars(e, cstr, strlen(cstr), &appended)
+            Self.calls.append_chars(e, cstr, strlen(cstr), &appended)
         }
         if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "append failed: \(rc)"]) }
         return appended
@@ -106,7 +179,7 @@ final class MetalRunner {
         var toks = tokens
         let rc = toks.withUnsafeMutableBufferPointer { bp -> Int32 in
             if let base = bp.baseAddress {
-                return codexpc_engine_append_tokens(e, base, bp.count)
+            return Self.calls.append_tokens(e, base, bp.count)
             }
             return 0
         }
@@ -130,7 +203,7 @@ final class MetalRunner {
             var ids: [(String, Int32, UInt32, [UInt32])] = []
             func q(_ name: String, _ typ: Int32) {
                 var gid: UInt32 = 0
-                _ = codexpc_engine_get_special_token_id(e, typ, &gid)
+                _ = Self.calls.get_special_token_id(e, typ, &gid)
                 let hids = harmonyDecoder.encode(text: name, allowedSpecial: [name]) // allow this special passthrough
                 ids.append((name, typ, gid, hids))
             }
@@ -162,7 +235,7 @@ final class MetalRunner {
 
         while generated < maxTokens && !isCancelled() {
             outCount = 0
-            let rc = codexpc_engine_sample(e, temp, seed, Int(batch), &tokens, &outCount)
+            let rc = Self.calls.sample(e, temp, seed, Int(batch), &tokens, &outCount)
             if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "sample failed: \(rc)"]) }
             if !loggedSample { log.info("sample rc=\(rc) out=\(outCount)"); loggedSample = true }
             if outCount == 0 {
@@ -191,7 +264,7 @@ final class MetalRunner {
                 for i in 0..<preview {
                     let t = tokens[i]
                     var needed: Int = 0
-                    let rc0 = codexpc_engine_decode_token(e, t, nil, 0, &needed)
+                    let rc0 = Self.calls.decode_token(e, t, nil, 0, &needed)
                     var s = ""
                     if rc0 == -2 && needed > 0 {
                         var buf = [UInt8](repeating: 0, count: needed)
@@ -199,7 +272,7 @@ final class MetalRunner {
                         let bufCount = buf.count
                         let rc1 = buf.withUnsafeMutableBytes { rawPtr -> Int32 in
                             let base = rawPtr.baseAddress
-                            return codexpc_engine_decode_token(e, t, base, bufCount, &need2)
+                            return Self.calls.decode_token(e, t, base, bufCount, &need2)
                         }
                         if rc1 == 0 {
                             s = String(bytes: buf.prefix(need2), encoding: .utf8) ?? ""
@@ -250,6 +323,6 @@ final class MetalRunner {
         guard let e = engine else { return }
         var toks = [UInt32](repeating: 0, count: 1)
         var outCount: Int = 0
-        _ = codexpc_engine_sample(e, 0.0, 0, 1, &toks, &outCount)
+        _ = Self.calls.sample(e, 0.0, 0, 1, &toks, &outCount)
     }
 }
