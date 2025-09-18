@@ -29,8 +29,10 @@ status:
 	launchctl print gui/$$(id -u)/com.yourorg.codexpc || true
 
 reload:
+	launchctl bootout gui/$$(id -u)/com.yourorg.codexpc 2>/dev/null || true
 	launchctl unload $$HOME/Library/LaunchAgents/com.yourorg.codexpc.plist 2>/dev/null || true
 	launchctl load -w $$HOME/Library/LaunchAgents/com.yourorg.codexpc.plist
+	launchctl kickstart -k gui/$$(id -u)/com.yourorg.codexpc 2>/dev/null || true
 
 # Usage: make warmup CHECKPOINT=/path/to/model.bin
 warmup:

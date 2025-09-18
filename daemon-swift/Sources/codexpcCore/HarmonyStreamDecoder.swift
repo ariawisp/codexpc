@@ -5,9 +5,11 @@ import os
 final class HarmonyStreamDecoder {
     private var enc: OpaquePointer?
     private var parser: OpaquePointer?
-    private var actionStopTokens: Set<UInt32> = []
     private var toolRecipient: String? = nil
     private var toolBuffer: String = ""
+    private var didStop: Bool = false
+    private var suppressedFormattingDeltas: Int = 0
+    private static let debugHarmony: Bool = true
 
     init() throws {
         var e: OpaquePointer?
@@ -29,17 +31,57 @@ final class HarmonyStreamDecoder {
             throw NSError(domain: "codexpc", code: Int(stp.rawValue), userInfo: [NSLocalizedDescriptionKey: "harmony parser init failed: \(msg)"])
         }
         self.parser = p
-        log.debug("HarmonyStreamDecoder initialized")
+        // Do NOT prime here. The render path emits the assistant header tokens
+        // (including channel=final) which will drive parser state correctly.
+        log.debug("HarmonyStreamDecoder initialized (no prime)")
+        if Self.debugHarmony { log.info("harmony debug enabled (env/file)") }
 
-        // Load assistant action stop tokens (e.g., <|call|>, <|return|>)
-        var toks = HarmonyOwnedU32Array(data: nil, len: 0)
-        let stt = harmony_encoding_stop_tokens_for_assistant_actions(self.enc, &toks, &err)
-        if stt == HARMONY_STATUS_OK, let data = toks.data {
-            let count = Int(toks.len)
-            let buf = UnsafeBufferPointer(start: data, count: count)
-            self.actionStopTokens = Set(buf)
+        // No raw-decode fallback; rely on event-driven decoding (STOP/TOOL_ARGS_DONE)
+    }
+
+    // Encode text with optional allowed special list; returns token IDs
+    func encode(text: String, allowedSpecial: [String]? = nil) -> [UInt32] {
+        guard let e = enc else { return [] }
+        var err: UnsafeMutablePointer<CChar>?
+        var ids: [UInt32] = []
+        let result: HarmonyStatus = text.withCString { ctext in
+            if let allowed = allowedSpecial, !allowed.isEmpty {
+                // Build C array of C strings for allowed_special
+                let dup = allowed.map { strdup($0) }
+                defer { dup.forEach { if let p = $0 { free(p) } } }
+                return dup.withUnsafeBufferPointer { bp -> HarmonyStatus in
+                    if let base = bp.baseAddress {
+                        return base.withMemoryRebound(to: UnsafePointer<CChar>?.self, capacity: bp.count) { rebased in
+                            var out = HarmonyOwnedU32Array(data: nil, len: 0)
+                            let st = harmony_encoding_encode(e, ctext, rebased, bp.count, &out, &err)
+                            if st == HARMONY_STATUS_OK, out.len > 0, let data = out.data {
+                                ids = Array(UnsafeBufferPointer(start: data, count: Int(out.len)))
+                            }
+                            harmony_owned_u32_array_free(out)
+                            return st
+                        }
+                    } else {
+                        var out = HarmonyOwnedU32Array(data: nil, len: 0)
+                        let st = harmony_encoding_encode(e, ctext, nil, 0, &out, &err)
+                        if st == HARMONY_STATUS_OK, out.len > 0, let data = out.data {
+                            ids = Array(UnsafeBufferPointer(start: data, count: Int(out.len)))
+                        }
+                        harmony_owned_u32_array_free(out)
+                        return st
+                    }
+                }
+            } else {
+                var out = HarmonyOwnedU32Array(data: nil, len: 0)
+                let st = harmony_encoding_encode(e, ctext, nil, 0, &out, &err)
+                if st == HARMONY_STATUS_OK, out.len > 0, let data = out.data {
+                    ids = Array(UnsafeBufferPointer(start: data, count: Int(out.len)))
+                }
+                harmony_owned_u32_array_free(out)
+                return st
+            }
         }
-        harmony_owned_u32_array_free(toks)
+        if result != HARMONY_STATUS_OK { if let e = err { harmony_string_free(e) } }
+        return ids
     }
 
     deinit {
@@ -60,49 +102,227 @@ final class HarmonyStreamDecoder {
         var err: UnsafeMutablePointer<CChar>?
         let st = harmony_streamable_parser_process(p, token, &err)
         if st != HARMONY_STATUS_OK {
+            let msg = err.map { String(cString: $0) } ?? "unknown"
             if let e = err { harmony_string_free(e) }
+            log.error("harmony parser process error: \(msg, privacy: .public)")
             return Result(delta: nil, toolEvent: nil, isStop: false)
         }
-        var deltaStr: String? = nil
-        // Determine channel and recipient
-        var chPtr: UnsafeMutablePointer<CChar>?
-        _ = harmony_streamable_parser_current_channel(p, &chPtr, &err)
-        let channel = chPtr.map { String(cString: $0) }
-        if let c = chPtr { harmony_string_free(c) }
+        if Self.debugHarmony { self.logParserState(prefix: "after_token_dbg") }
+        // Also surface a brief info-state for the first few tokens
+        self.logInfoState(prefix: "after_token")
 
-        var rcptPtr: UnsafeMutablePointer<CChar>?
-        _ = harmony_streamable_parser_current_recipient(p, &rcptPtr, &err)
-        let recipient = rcptPtr.map { String(cString: $0) }
-        if let r = rcptPtr { harmony_string_free(r) }
-
-        // Accumulate delta (only user-facing 'final' channel)
-        var cstr: UnsafeMutablePointer<CChar>?
-        let dl = harmony_streamable_parser_last_content_delta(p, &cstr, &err)
-        if dl == HARMONY_STATUS_OK, let s = cstr {
-            let str = String(cString: s)
-            if !str.isEmpty {
-                // Only emit user-facing delta if channel is 'final'
-                if channel == "final" {
-                    deltaStr = str
-                }
+        var outDelta: String? = nil
+        // Drain all available events for this token
+        while true {
+            var ev = HarmonyStreamEvent(kind: 0, channel: nil, recipient: nil, name: nil, call_id: nil, text: nil, json: nil)
+            let est = harmony_streamable_parser_next_event(p, &ev, &err)
+            if est != HARMONY_STATUS_OK {
+                if let e = err { harmony_string_free(e) }
+                break
             }
+            if ev.kind == 0 { // NONE
+                break
+            }
+            // Map events
+            switch ev.kind {
+            case 1: // CONTENT_DELTA
+                if let t = ev.text {
+                    let s = String(cString: t)
+                    let ch = ev.channel.map { String(cString: $0) }
+                    let preview = s.prefix(160).replacingOccurrences(of: "\n", with: " ")
+                    log.info("harmony event: CONTENT_DELTA channel=\(ch ?? "(nil)", privacy: .public) len=\(s.count, privacy: .public) text=\(preview, privacy: .public)")
+                    // Suppress formatting markers accidentally emitted as text by the model.
+                    if Self.isFormattingMarkerText(s) {
+                        self.suppressedFormattingDeltas += 1
+                        if self.suppressedFormattingDeltas == 32 || self.suppressedFormattingDeltas % 128 == 0 {
+                            log.info("suppressing formatting deltas count=\(self.suppressedFormattingDeltas)")
+                        }
+                    } else if ch == "final" {
+                        outDelta = s
+                    }
+                }
+            case 2: // TOOL_CALL_BEGIN
+                if let rc = ev.recipient { toolRecipient = String(cString: rc); toolBuffer = "" }
+                if let name = ev.recipient {
+                    let s = String(cString: name)
+                    log.info("harmony event: TOOL_CALL_BEGIN recipient=\(s, privacy: .public)")
+                }
+            case 3: // TOOL_ARGS_DELTA
+                if let rc = ev.recipient { let recStr = String(cString: rc); if toolRecipient != recStr { toolRecipient = recStr; toolBuffer = "" } }
+                if let j = ev.json { toolBuffer += String(cString: j) }
+                if let j = ev.json {
+                    let txt = String(cString: j)
+                    let preview = txt.prefix(160).replacingOccurrences(of: "\n", with: " ")
+                    log.info("harmony event: TOOL_ARGS_DELTA len=\(txt.count, privacy: .public) json=\(preview, privacy: .public)")
+                }
+            case 4: // TOOL_ARGS_DONE
+                // Finalize current tool call buffer into an event
+                if let rec = toolRecipient {
+                    let name = rec
+                    let args = toolBuffer
+                    // Clear buffer so we emit at most once
+                    toolRecipient = nil
+                    toolBuffer = ""
+                    log.info("harmony event: TOOL_ARGS_DONE recipient=\(name, privacy: .public) bytes=\(args.utf8.count, privacy: .public)")
+                    harmony_stream_event_free(&ev)
+                    return Result(delta: outDelta, toolEvent: (name: name, input: args), isStop: didStop)
+                }
+            case 5: // STOP
+                didStop = true
+                log.info("harmony event: STOP")
+            default:
+                break
+            }
+            harmony_stream_event_free(&ev)
         }
-        if let s = cstr { harmony_string_free(s) }
 
-        var toolEvent: (String, String)? = nil
-        // Tool call detection: if recipient is present in 'commentary', capture args until action stop token
-        if let rec = recipient, channel == "commentary" {
-            if toolRecipient != rec { toolRecipient = rec; toolBuffer = "" }
-            // Append all delta (even if not final) to tool buffer
-            if let dl = deltaStr { toolBuffer += dl }
+        // Optionally surface parser delta only if current channel is final
+        var deltaFromParser: String? = nil
+        var chPtr: UnsafeMutablePointer<CChar>? = nil
+        err = nil
+        if harmony_streamable_parser_current_channel(p, &chPtr, &err) == HARMONY_STATUS_OK {
+            defer { if let ch = chPtr { harmony_string_free(ch) } }
+            let channelStr = chPtr.map { String(cString: $0) } ?? ""
+            if channelStr == "final" {
+                var dptr: UnsafeMutablePointer<CChar>?
+                err = nil
+                if harmony_streamable_parser_last_content_delta(p, &dptr, &err) == HARMONY_STATUS_OK, let d = dptr {
+                    deltaFromParser = String(cString: d)
+                    harmony_string_free(d)
+                } else if let e = err { harmony_string_free(e) }
+            }
+        } else if let e = err {
+            harmony_string_free(e)
         }
-        let isStop = actionStopTokens.contains(token)
-        if isStop, let rec = toolRecipient, !rec.isEmpty {
+
+        // If STOP arrives without TOOL_ARGS_DONE (edge-case), finalize any pending tool buffer
+        var toolEvent: (String, String)? = nil
+        if didStop, let rec = toolRecipient, !rec.isEmpty {
             toolEvent = (rec, toolBuffer)
             toolRecipient = nil
             toolBuffer = ""
         }
+        let mergedDelta: String? = {
+            switch (outDelta, deltaFromParser) {
+            case (nil, nil): return nil
+            case let (a?, nil): return a
+            case let (nil, b?): return b
+            case let (a?, b?):
+                if b.hasPrefix(a) { return b }
+                if a.hasPrefix(b) { return a }
+                return a + b
+            }
+        }()
+        return Result(delta: mergedDelta, toolEvent: toolEvent, isStop: didStop)
+    }
 
-        return Result(delta: deltaStr, toolEvent: toolEvent, isStop: isStop)
+    // Signal end-of-sequence to the parser and drain any pending events (e.g., STOP)
+    func processEOS() -> Result {
+        guard let p = parser else { return Result(delta: nil, toolEvent: nil, isStop: false) }
+        var err: UnsafeMutablePointer<CChar>?
+        let st = harmony_streamable_parser_process_eos(p, &err)
+        if st != HARMONY_STATUS_OK {
+            let msg = err.map { String(cString: $0) } ?? "unknown"
+            if let e = err { harmony_string_free(e) }
+            log.error("harmony parser eos error: \(msg, privacy: .public)")
+            return Result(delta: nil, toolEvent: nil, isStop: false)
+        }
+        if Self.debugHarmony { self.logParserState(prefix: "after_eos") }
+        // Drain once to surface any STOP/tool events
+        var outDelta: String? = nil
+        var toolEvent: (String, String)? = nil
+        while true {
+            var ev = HarmonyStreamEvent(kind: 0, channel: nil, recipient: nil, name: nil, call_id: nil, text: nil, json: nil)
+            let est = harmony_streamable_parser_next_event(p, &ev, &err)
+            if est != HARMONY_STATUS_OK { if let e = err { harmony_string_free(e) }; break }
+            if ev.kind == 0 { break }
+            switch ev.kind {
+            case 1:
+                if let t = ev.text { outDelta = String(cString: t) }
+            case 4:
+                if let rc = ev.recipient { toolEvent = (String(cString: rc), toolBuffer) }
+            case 5:
+                didStop = true
+            default:
+                break
+            }
+            harmony_stream_event_free(&ev)
+        }
+        return Result(delta: outDelta, toolEvent: toolEvent, isStop: didStop)
+    }
+
+    // Info-level dump of current parser state (not behind debug flags).
+    func logInfoState(prefix: String) {
+        guard let p = parser else { return }
+        var err: UnsafeMutablePointer<CChar>?
+        var rPtr: UnsafeMutablePointer<CChar>? = nil
+        var chPtr: UnsafeMutablePointer<CChar>? = nil
+        var ctPtr: UnsafeMutablePointer<CChar>? = nil
+        var recPtr: UnsafeMutablePointer<CChar>? = nil
+        var deltaPtr: UnsafeMutablePointer<CChar>? = nil
+        _ = harmony_streamable_parser_current_role(p, &rPtr, &err)
+        _ = harmony_streamable_parser_current_channel(p, &chPtr, &err)
+        _ = harmony_streamable_parser_current_content_type(p, &ctPtr, &err)
+        _ = harmony_streamable_parser_current_recipient(p, &recPtr, &err)
+        _ = harmony_streamable_parser_last_content_delta(p, &deltaPtr, &err)
+        let role = rPtr.map { String(cString: $0) } ?? "(nil)"
+        let channel = chPtr.map { String(cString: $0) } ?? "(nil)"
+        let ctype = ctPtr.map { String(cString: $0) } ?? "(nil)"
+        let recip = recPtr.map { String(cString: $0) } ?? "(nil)"
+        var deltaInfo = "nil"
+        if let d = deltaPtr {
+            let s = String(cString: d)
+            let preview = s.prefix(200).replacingOccurrences(of: "\n", with: " ")
+            deltaInfo = "len=\(s.count) text=\(preview)"
+        }
+        if let r = rPtr { harmony_string_free(r) }
+        if let c = chPtr { harmony_string_free(c) }
+        if let t = ctPtr { harmony_string_free(t) }
+        if let rc = recPtr { harmony_string_free(rc) }
+        if let d = deltaPtr { harmony_string_free(d) }
+        log.info("harmony state \(prefix, privacy: .public): role=\(role, privacy: .public) channel=\(channel, privacy: .public) ctype=\(ctype, privacy: .public) recipient=\(recip, privacy: .public) last_delta=\(deltaInfo, privacy: .public)")
+    }
+
+    private func logParserState(prefix: String) {
+        guard let p = parser else { return }
+        var err: UnsafeMutablePointer<CChar>?
+        var rPtr: UnsafeMutablePointer<CChar>? = nil
+        var chPtr: UnsafeMutablePointer<CChar>? = nil
+        var ctPtr: UnsafeMutablePointer<CChar>? = nil
+        var recPtr: UnsafeMutablePointer<CChar>? = nil
+        var deltaPtr: UnsafeMutablePointer<CChar>? = nil
+        _ = harmony_streamable_parser_current_role(p, &rPtr, &err)
+        _ = harmony_streamable_parser_current_channel(p, &chPtr, &err)
+        _ = harmony_streamable_parser_current_content_type(p, &ctPtr, &err)
+        _ = harmony_streamable_parser_current_recipient(p, &recPtr, &err)
+        _ = harmony_streamable_parser_last_content_delta(p, &deltaPtr, &err)
+        let role = rPtr.map { String(cString: $0) } ?? "(nil)"
+        let channel = chPtr.map { String(cString: $0) } ?? "(nil)"
+        let ctype = ctPtr.map { String(cString: $0) } ?? "(nil)"
+        let recip = recPtr.map { String(cString: $0) } ?? "(nil)"
+        var deltaInfo = "nil"
+        if let d = deltaPtr {
+            let s = String(cString: d)
+            let preview = s.prefix(200).replacingOccurrences(of: "\n", with: " ")
+            deltaInfo = "len=\(s.count) text=\(preview)"
+        }
+        if let r = rPtr { harmony_string_free(r) }
+        if let c = chPtr { harmony_string_free(c) }
+        if let t = ctPtr { harmony_string_free(t) }
+        if let rc = recPtr { harmony_string_free(rc) }
+        if let d = deltaPtr { harmony_string_free(d) }
+        log.debug("harmony state \(prefix, privacy: .public): role=\(role, privacy: .public) channel=\(channel, privacy: .public) ctype=\(ctype, privacy: .public) recipient=\(recip, privacy: .public) last_delta=\(deltaInfo, privacy: .public)")
+    }
+
+    private static func isFormattingMarkerText(_ s: String) -> Bool {
+        // Markers and header atoms sometimes sampled as plain text by the model.
+        if s == "<|channel|>" || s == "<|message|>" || s == "<|start|>" || s == "<|end|>" || s == "<|return|>" || s == "<|call|>" || s == "<|constrain|>" || s == "<|refusal|>" {
+            return true
+        }
+        // Common atoms that appear in headers
+        if s == "final" || s == "analysis" || s == "commentary" || s == "assistant" {
+            return true
+        }
+        return false
     }
 }

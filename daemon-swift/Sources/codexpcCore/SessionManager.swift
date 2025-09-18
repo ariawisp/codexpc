@@ -72,6 +72,7 @@ final class Session {
     private let onFinish: (String) -> Void
     private let startNs: UInt64
     private let allowTools: Bool
+    private let toolRegistry: ToolRegistry?
 
     init(reqId: String, connection: xpc_connection_t, req: XpcMessage, onFinish: @escaping (String) -> Void) {
         self.reqId = reqId
@@ -80,6 +81,14 @@ final class Session {
         self.onFinish = onFinish
         self.startNs = DispatchTime.now().uptimeNanoseconds
         self.allowTools = ToolExecutor.Config.enabled
+        // Parse tool registry early (names + json_schema)
+        self.toolRegistry = ToolRegistry.fromXpcArray(xpc_dictionary_get_value(req.obj, "tools"))
+        if let reg = self.toolRegistry {
+            // Narrow allowlist to declared tool names when allowlist not specified
+            if ToolExecutor.Config.allowed == nil {
+                ToolExecutor.Config.allowed = Set(reg.schemas.keys)
+            }
+        }
     }
 
     func start() {
@@ -127,7 +136,8 @@ final class Session {
             if let convPtr = xpc_dictionary_get_string(req.obj, "harmony_conversation") {
                 let conv = String(cString: convPtr)
                 let fmt = try HarmonyFormatter()
-                let appended = try runner.appendConversationJSON(conversationJson: conv, nextRole: "assistant", formatter: fmt)
+                let toolsJson = self.toolRegistry?.toolsJsonForHarmony
+                let appended = try runner.appendConversationJSON(conversationJson: conv, nextRole: "assistant", formatter: fmt, toolsJson: toolsJson)
                 inputTokens += UInt64(appended)
                 log.info("harmony append (json) tokens=\(appended)")
             } else {
@@ -145,7 +155,8 @@ final class Session {
                 }
                 if toolsPresent { self.sendToolPlaceholder() }
                 let fmt = try HarmonyFormatter()
-                let appended = try runner.appendSystemAndUserFormatted(instructions.isEmpty ? nil : instructions, userParts: userParts, formatter: fmt)
+                let toolsJson = self.toolRegistry?.toolsJsonForHarmony
+                let appended = try runner.appendSystemAndUserFormatted(instructions.isEmpty ? nil : instructions, userParts: userParts, formatter: fmt, toolsJson: toolsJson)
                 inputTokens += UInt64(appended)
                 log.info("harmony append tokens=\(appended) user_parts=\(userParts.count)")
             }
@@ -177,31 +188,63 @@ final class Session {
             watchdog.setEventHandler { [weak self] in
                 guard let self = self else { return }
                 if !sawDelta {
-                    log.debug("waiting for first tokens req_id=\(self.reqId, privacy: .public)")
+                    // Promote to info so it's visible in default log settings
+                    log.info("waiting for first tokens req_id=\(self.reqId, privacy: .public)")
                 } else {
                     watchdog.cancel()
                 }
             }
             watchdog.resume()
-            // 0 means unlimited; stream until EOS or cancel
+            // 0 means unlimited; stream until EOS or cancel; handle tool calls then resume
             let effMaxTokens = (maxTokens <= 0) ? Int.max : maxTokens
-            let outTok = try runner.stream(temperature: temperature, maxTokens: effMaxTokens, isCancelled: { [weak self] in
-                return self?.cancelled ?? true
-            }, onDelta: { text in
-                if !sawDelta && !text.isEmpty { sawDelta = true }
-                emitter.submit(text)
-            }, onToolCall: { [weak self] name, input in
-                guard let self = self else { return }
-                self.sendToolCall(name: name, input: input)
-                if self.allowTools {
-                    let res = ToolExecutor.executeEnforced(name: name, input: input)
-                    if res.ok { self.sendToolOutput(name: name, output: res.output) }
-                    else { self.sendToolFailure(name: name, error: res.output) }
+            var totalOutTok: Int = 0
+            var continueStreaming = true
+            var lastToolName: String? = nil
+            var lastToolOutput: String? = nil
+            while continueStreaming && !self.cancelled {
+                lastToolName = nil
+                lastToolOutput = nil
+                let outTok = try runner.stream(temperature: temperature, maxTokens: effMaxTokens, isCancelled: { [weak self] in
+                    return self?.cancelled ?? true
+                }, onDelta: { text in
+                    if !sawDelta && !text.isEmpty { sawDelta = true }
+                    emitter.submit(text)
+                }, onToolCall: { [weak self] name, input in
+                    guard let self = self else { return }
+                    // Validate arguments if a schema is present
+                    if let reg = self.toolRegistry {
+                        let vr = reg.validate(name: name, inputJson: input)
+                        if !vr.ok {
+                            self.sendToolCall(name: name, input: input)
+                            self.sendToolFailure(name: name, error: vr.error ?? "invalid arguments")
+                            lastToolName = name
+                            lastToolOutput = vr.error ?? "invalid arguments"
+                            return
+                        }
+                    }
+                    self.sendToolCall(name: name, input: input)
+                    var toolOutput = ""
+                    if self.allowTools {
+                        let res = ToolExecutor.executeEnforced(name: name, input: input)
+                        if res.ok { self.sendToolOutput(name: name, output: res.output); toolOutput = res.output }
+                        else { self.sendToolFailure(name: name, error: res.output); toolOutput = res.output }
+                    }
+                    lastToolName = name
+                    lastToolOutput = toolOutput
+                })
+                totalOutTok += outTok
+                if let tname = lastToolName {
+                    // Append tool message and continue streaming
+                    let fmt = try HarmonyFormatter()
+                    _ = try runner.appendToolMessage(toolName: tname, output: lastToolOutput ?? "", formatter: fmt)
+                    continue
+                } else {
+                    continueStreaming = false
                 }
-            })
+            }
             watchdog.cancel()
             emitter.close()
-            self.sendCompleted(inputTokens: inputTokens, outputTokens: UInt64(outTok))
+            self.sendCompleted(inputTokens: inputTokens, outputTokens: UInt64(totalOutTok))
         let durMs = Double(DispatchTime.now().uptimeNanoseconds - self.startNs) / 1_000_000.0
         log.debug("session duration_ms=\(durMs, privacy: .public) req_id=\(self.reqId, privacy: .public)")
         self.onFinish(self.reqId)

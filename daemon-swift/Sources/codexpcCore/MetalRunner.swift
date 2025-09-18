@@ -79,37 +79,66 @@ final class MetalRunner {
         return try formatter.appendSystem(to: e, instructions: instructions)
     }
 
-    func appendSystemAndUserFormatted(_ instructions: String?, userParts: [String], formatter: HarmonyFormatter) throws -> Int {
+    func appendSystemAndUserFormatted(_ instructions: String?, userParts: [String], formatter: HarmonyFormatter, toolsJson: String? = nil) throws -> Int {
         guard let e = engine else { return 0 }
-        return try formatter.appendSystemAndUser(to: e, instructions: instructions, userParts: userParts)
+        return try formatter.appendSystemAndUser(to: e, instructions: instructions, userParts: userParts, toolsJson: toolsJson)
     }
 
     // Appends a pre-built Harmony conversation JSON via the formatter
-    func appendConversationJSON(conversationJson: String, nextRole: String = "assistant", formatter: HarmonyFormatter) throws -> Int {
+    func appendConversationJSON(conversationJson: String, nextRole: String = "assistant", formatter: HarmonyFormatter, toolsJson: String? = nil) throws -> Int {
         guard let e = engine else { return 0 }
-        return try formatter.appendConversationJSON(to: e, conversationJson: conversationJson, nextRole: nextRole)
+        return try formatter.appendConversationJSON(to: e, conversationJson: conversationJson, nextRole: nextRole, toolsJson: toolsJson)
+    }
+
+    func appendToolMessage(toolName: String, output: String, formatter: HarmonyFormatter) throws -> Int {
+        guard let e = engine else { return 0 }
+        return try formatter.appendToolMessage(to: e, toolName: toolName, output: output)
     }
 
     // Streams tokens, calling onDelta with decoded text, and returns number of tokens generated
     func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void, onToolCall: ((String, String) -> Void)? = nil) throws -> Int {
         guard let e = engine else { return 0 }
         var generated = 0
+        var tokensSinceDelta = 0
         let seed: UInt64 = 0
         let batch = 16
         var tokens = [UInt32](repeating: 0, count: batch)
         var outCount: Int = 0
-        var buf = [UInt8](repeating: 0, count: 2048)
-        let harmonyDecoder = try? HarmonyStreamDecoder()
-        var usingHarmony = (harmonyDecoder != nil)
+        let harmonyDecoder = try HarmonyStreamDecoder()
+        // One-time check: verify Harmony vs GPT-OSS special token IDs align
+        do {
+            var ids: [(String, Int32, UInt32, [UInt32])] = []
+            func q(_ name: String, _ typ: Int32) {
+                var gid: UInt32 = 0
+                _ = codexpc_engine_get_special_token_id(e, typ, &gid)
+                let hids = harmonyDecoder.encode(text: name, allowedSpecial: [name]) // allow this special passthrough
+                ids.append((name, typ, gid, hids))
+            }
+            q("<|start|>", 2)
+            q("<|message|>", 3)
+            q("<|end|>", 4)
+            q("<|return|>", 1)
+            q("<|channel|>", 7)
+            q("<|call|>", 8)
+            q("<|constrain|>", 6)
+            q("<|refusal|>", 5)
+            var lines: [String] = []
+            for (name, typ, gid, hids) in ids {
+                let hid = hids.first.map { String($0) } ?? "(none)"
+                lines.append("\(name) type=\(typ) gptoss=\(gid) harmony=\(hid)")
+            }
+            log.info("special token ids: \(lines.joined(separator: "; "), privacy: .public)")
+            let helloIds = harmonyDecoder.encode(text: "Hello")
+            log.info("harmony encode('Hello') -> \(helloIds.map(String.init).joined(separator: ", "), privacy: .public)")
+        }
         // Clamp temperature to a sane range and handle NaN/infinite
         var temp = temperature
         if !temp.isFinite || temp < 0 { temp = 0.0 }
         if temp > 4.0 { temp = 4.0 }
-        log.info("stream start temp=\(temp, privacy: .public) max=\(maxTokens) harmony=\(usingHarmony)")
+        log.info("stream start temp=\(temp, privacy: .public) max=\(maxTokens) harmony=true")
         var loggedSample = false
         var emptySamples = 0
         var loggedFirstDelta = false
-        var sawFinal = false
 
         while generated < maxTokens && !isCancelled() {
             outCount = 0
@@ -118,51 +147,78 @@ final class MetalRunner {
             if !loggedSample { log.info("sample rc=\(rc) out=\(outCount)"); loggedSample = true }
             if outCount == 0 {
                 emptySamples += 1
+                // If the engine produced at least one token previously and now reports none,
+                // consider the sequence ended and flush EOS into the Harmony parser so it can
+                // surface any pending final delta and STOP.
+                if generated > 0 {
+                    log.info("engine idle after \(generated) tokens; flushing EOS")
+                    let res = harmonyDecoder.processEOS()
+                    if let d = res.delta, !d.isEmpty {
+                        if !loggedFirstDelta { log.info("first delta len=\(d.count)"); loggedFirstDelta = true }
+                        onDelta(d)
+                    }
+                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input) }
+                    return generated
+                }
+                // Otherwise, keep waiting for first tokens and try again.
                 if emptySamples % 10 == 0 { log.debug("sample empty count=\(emptySamples)") }
                 continue
             }
+            // For visibility, decode and log the first few tokens when no deltas yet.
+            if !loggedFirstDelta {
+                let preview = min(outCount, 8)
+                var parts: [String] = []
+                for i in 0..<preview {
+                    let t = tokens[i]
+                    var needed: Int = 0
+                    let rc0 = codexpc_engine_decode_token(e, t, nil, 0, &needed)
+                    var s = ""
+                    if rc0 == -2 && needed > 0 {
+                        var buf = [UInt8](repeating: 0, count: needed)
+                        var need2 = 0
+                        let bufCount = buf.count
+                        let rc1 = buf.withUnsafeMutableBytes { rawPtr -> Int32 in
+                            let base = rawPtr.baseAddress
+                            return codexpc_engine_decode_token(e, t, base, bufCount, &need2)
+                        }
+                        if rc1 == 0 {
+                            s = String(bytes: buf.prefix(need2), encoding: .utf8) ?? ""
+                        }
+                    }
+                    let sp = s.replacingOccurrences(of: "\n", with: " ")
+                    parts.append("#\(i)=\(t) '" + sp + "'")
+                }
+                if !parts.isEmpty { log.info("first tokens: \(parts.joined(separator: ", "), privacy: .public)") }
+            }
+
             for i in 0..<outCount {
                 if isCancelled() { return generated }
                 let t = tokens[i]
-                if !usingHarmony, endToken != 0 && t == endToken { return generated }
-                if usingHarmony, let dec = harmonyDecoder {
-                    let res = dec.process(token: t)
+                if endToken != 0 && t == endToken {
+                    log.info("engine eos encountered")
+                    let res = harmonyDecoder.processEOS()
                     if let d = res.delta, !d.isEmpty {
                         if !loggedFirstDelta { log.info("first delta len=\(d.count)"); loggedFirstDelta = true }
-                        sawFinal = true
                         onDelta(d)
                     }
-                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input); return generated }
-                    if res.isStop {
-                        if sawFinal {
-                            return generated
-                        } else {
-                            // Ignore premature stop until we have final
-                            continue
-                        }
-                    }
-                } else {
-                    var required: Int = 0
-                    var drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
-                    if drc == -2 { // grow buffer
-                        buf = [UInt8](repeating: 0, count: required)
-                        drc = codexpc_engine_decode_token(e, t, &buf, buf.count, &required)
-                    }
-                    if drc != 0 {
-                        // Skip undecodable token; continue streaming
-                        continue
-                    }
-                    let s = String(bytes: buf.prefix(required), encoding: .utf8) ?? ""
-                    if !s.isEmpty {
-                        if !loggedFirstDelta { log.info("first delta len=\(s.count)"); loggedFirstDelta = true }
-                        onDelta(s)
-                    }
+                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input) }
+                    return generated
                 }
+                let res = harmonyDecoder.process(token: t)
+                if let d = res.delta, !d.isEmpty {
+                    if !loggedFirstDelta { log.info("first delta len=\(d.count)"); loggedFirstDelta = true }
+                    onDelta(d)
+                    tokensSinceDelta = 0
+                }
+                if let ev = res.toolEvent { onToolCall?(ev.name, ev.input); return generated }
+                if res.isStop { return generated }
                 generated += 1
-                // If Harmony produced no deltas across a reasonable number of tokens, fall back to raw decode
-                if usingHarmony && !loggedFirstDelta && generated >= 128 {
-                    usingHarmony = false
-                    log.info("decoder fallback: switching to raw decode after \(generated) tokens without delta")
+                tokensSinceDelta += 1
+                if !loggedFirstDelta && tokensSinceDelta == 128 {
+                    log.info("no final deltas yet after 128 tokens; dumping parser state")
+                    harmonyDecoder.logInfoState(prefix: "no_final_deltas_128")
+                } else if !loggedFirstDelta && tokensSinceDelta % 512 == 0 {
+                    log.info("still waiting for final deltas; tokens=\(tokensSinceDelta)")
                 }
                 if generated >= maxTokens || isCancelled() { return generated }
             }

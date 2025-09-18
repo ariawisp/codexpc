@@ -32,7 +32,14 @@ fi
 export GPTOSS_INCLUDE_DIR GPTOSS_LIB_DIR
 
 echo "Building codexpcd (release)..."
-(cd "$ROOT_DIR/daemon-swift" && swift build -c release)
+# Align the app's deployment target with Harmony's to avoid ld warnings
+MINOS="$({ otool -l "$HARMONY_LIB_DIR/libopenai_harmony.dylib" 2>/dev/null || true; } | awk '/LC_BUILD_VERSION/,/cmdsize/ { if ($1=="minos") { print $2; exit } }')"
+if [ -n "$MINOS" ]; then
+  echo "Detected Harmony dylib min macOS: $MINOS"
+  (cd "$ROOT_DIR/daemon-swift" && MACOSX_DEPLOYMENT_TARGET="$MINOS" swift build -c release)
+else
+  (cd "$ROOT_DIR/daemon-swift" && swift build -c release)
+fi
 
 # Choose install dir (prefer /opt; fallback to ~/.local)
 PREF_DEST_DIR="/opt/codexpc/bin"
@@ -100,6 +107,11 @@ cat >"$PLIST_DST" <<PLIST
   <array>
     <string>${BIN_PATH}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DYLD_LIBRARY_PATH</key>
+    <string>${BASE_DIR}/lib</string>
+  </dict>
   <key>MachServices</key>
   <dict>
     <key>com.yourorg.codexpc</key>
@@ -114,9 +126,14 @@ cat >"$PLIST_DST" <<PLIST
 PLIST
 
 echo "Reloading LaunchAgent..."
+# Proactively stop and bootout any existing instance to avoid stale processes
+launchctl stop com.yourorg.codexpc 2>/dev/null || true
+launchctl bootout gui/$(id -u)/com.yourorg.codexpc 2>/dev/null || true
+pkill -9 -x codexpcd 2>/dev/null || true
+# Unload if present (ignore errors), then load fresh and kickstart
 launchctl unload "$PLIST_DST" 2>/dev/null || true
 launchctl load -w "$PLIST_DST"
-launchctl start com.yourorg.codexpc || true
+launchctl kickstart -k gui/$(id -u)/com.yourorg.codexpc 2>/dev/null || true
 
 # Adjust the binary's reference to Harmony dylib to use @rpath if needed
 if otool -L "$BIN_PATH" | rg -q "libopenai_harmony"; then
@@ -124,6 +141,11 @@ if otool -L "$BIN_PATH" | rg -q "libopenai_harmony"; then
   if [ -n "$OLD_REF" ] && [ "$OLD_REF" != "@rpath/libopenai_harmony.dylib" ]; then
     echo "Rewriting Harmony dylib reference in codexpcd: $OLD_REF -> @rpath/libopenai_harmony.dylib"
     install_name_tool -change "$OLD_REF" "@rpath/libopenai_harmony.dylib" "$BIN_PATH" || true
+  fi
+  # Ensure the binary has an rpath pointing to our colocated lib dir
+  if ! otool -l "$BIN_PATH" | rg -q "LC_RPATH[\s\S]*$BASE_DIR/lib"; then
+    echo "Adding RPATH for Harmony dylib: $BASE_DIR/lib"
+    install_name_tool -add_rpath "$BASE_DIR/lib" "$BIN_PATH" || true
   fi
 fi
 
