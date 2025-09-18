@@ -189,11 +189,14 @@ final class HarmonyStreamDecoder {
         // If STOP arrives without TOOL_ARGS_DONE (edge-case), finalize any pending tool buffer
         var toolEvent: (String, String, String)? = nil
         if didStop, let rec = toolRecipient, !rec.isEmpty {
-            toolEvent = (rec, toolBuffer)
+            toolEvent = (rec, toolBuffer, "")
             toolRecipient = nil
             toolBuffer = ""
         }
-        return Result(delta: outDelta, toolEvent: toolEvent, isStop: didStop)
+        if let te = toolEvent {
+            return Result(delta: outDelta, toolEvent: (name: te.0, input: te.1, callId: te.2), isStop: didStop)
+        }
+        return Result(delta: outDelta, toolEvent: nil, isStop: didStop)
     }
 
     // Signal end-of-sequence to the parser and drain any pending events (e.g., STOP)
@@ -210,7 +213,7 @@ final class HarmonyStreamDecoder {
         if Self.debugHarmony { self.logParserState(prefix: "after_eos") }
         // Drain once to surface any STOP/tool events
         var outDelta: String? = nil
-        var toolEvent: (String, String)? = nil
+        var toolEvent: (String, String, String)? = nil
         while true {
             var ev = HarmonyStreamEvent(kind: 0, channel: nil, recipient: nil, name: nil, call_id: nil, text: nil, json: nil)
             let est = harmony_streamable_parser_next_event(p, &ev, &err)

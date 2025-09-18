@@ -158,7 +158,7 @@ final class MetalRunner {
                         if !loggedFirstDelta { log.info("first delta len=\(d.count)"); loggedFirstDelta = true }
                         onDelta(d)
                     }
-                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input) }
+                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input, ev.callId) }
                     return generated
                 }
                 // Otherwise, keep waiting for first tokens and try again.
@@ -217,7 +217,7 @@ final class MetalRunner {
                     log.info("no progress in final channel after \(tokensSinceDelta) tokens; flushing EOS")
                     let res = harmonyDecoder.processEOS()
                     if let d = res.delta, !d.isEmpty { onDelta(d) }
-                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input) }
+                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input, ev.callId) }
                     return generated
                 }
                 if generated >= maxTokens || isCancelled() { return generated }
