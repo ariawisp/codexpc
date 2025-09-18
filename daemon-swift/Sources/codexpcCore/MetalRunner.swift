@@ -14,6 +14,20 @@ typealias fn_decode_token_t = @convention(c) (codexpc_engine_t?, UInt32, UnsafeM
 typealias fn_get_end_token_id_t = @convention(c) (codexpc_engine_t?, UnsafeMutablePointer<UInt32>?) -> Int32
 typealias fn_get_special_token_id_t = @convention(c) (codexpc_engine_t?, Int32, UnsafeMutablePointer<UInt32>?) -> Int32
 
+// Multi-agent / shared-KV API (optional)
+typealias fn_shared_kv_open_t = @convention(c) (codexpc_engine_t?, Int32, UnsafeMutablePointer<OpaquePointer?>?) -> Int32
+typealias fn_shared_kv_open_ex_t = @convention(c) (codexpc_engine_t?, Int32, Int32, Int32, UnsafeMutablePointer<OpaquePointer?>?) -> Int32
+typealias fn_shared_kv_close_t = @convention(c) (OpaquePointer?) -> Void
+typealias fn_agent_open_t = @convention(c) (codexpc_engine_t?, OpaquePointer?, UnsafeMutablePointer<OpaquePointer?>?) -> Int32
+typealias fn_agent_close_t = @convention(c) (OpaquePointer?) -> Void
+typealias fn_agent_reset_t = @convention(c) (OpaquePointer?) -> Int32
+typealias fn_agent_append_tokens_t = @convention(c) (OpaquePointer?, UnsafePointer<UInt32>?, Int) -> Int32
+typealias fn_agent_append_chars_t = @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int, UnsafeMutablePointer<Int>?) -> Int32
+typealias fn_agent_set_boundary_t = @convention(c) (OpaquePointer?, Int32) -> Int32
+typealias fn_agent_set_logit_mask_t = @convention(c) (OpaquePointer?, UnsafePointer<Int32>?, Int, UnsafePointer<Int32>?, Int) -> Int32
+typealias fn_agent_clear_logit_mask_t = @convention(c) (OpaquePointer?) -> Int32
+typealias fn_agent_sample_t = @convention(c) (OpaquePointer?, Float, UInt64, Int, UnsafeMutablePointer<UInt32>?, UnsafeMutablePointer<Int>?) -> Int32
+
 struct EngineCalls {
     let open: fn_open_t
     let close: fn_close_t
@@ -24,6 +38,19 @@ struct EngineCalls {
     let decode_token: fn_decode_token_t
     let get_end_token_id: fn_get_end_token_id_t
     let get_special_token_id: fn_get_special_token_id_t
+    // optional multi-agent
+    let shared_kv_open: fn_shared_kv_open_t?
+    let shared_kv_open_ex: fn_shared_kv_open_ex_t?
+    let shared_kv_close: fn_shared_kv_close_t?
+    let agent_open: fn_agent_open_t?
+    let agent_close: fn_agent_close_t?
+    let agent_reset: fn_agent_reset_t?
+    let agent_append_tokens: fn_agent_append_tokens_t?
+    let agent_append_chars: fn_agent_append_chars_t?
+    let agent_set_boundary: fn_agent_set_boundary_t?
+    let agent_set_logit_mask: fn_agent_set_logit_mask_t?
+    let agent_clear_logit_mask: fn_agent_clear_logit_mask_t?
+    let agent_sample: fn_agent_sample_t?
 }
 
 private func defaultEngineCalls() -> EngineCalls {
@@ -36,7 +63,12 @@ private func defaultEngineCalls() -> EngineCalls {
         sample: codexpc_engine_sample,
         decode_token: codexpc_engine_decode_token,
         get_end_token_id: codexpc_engine_get_end_token_id,
-        get_special_token_id: codexpc_engine_get_special_token_id
+        get_special_token_id: codexpc_engine_get_special_token_id,
+        shared_kv_open: nil, shared_kv_open_ex: nil, shared_kv_close: nil,
+        agent_open: nil, agent_close: nil, agent_reset: nil,
+        agent_append_tokens: nil, agent_append_chars: nil,
+        agent_set_boundary: nil, agent_set_logit_mask: nil,
+        agent_clear_logit_mask: nil, agent_sample: nil
     )
 }
 
@@ -57,7 +89,25 @@ final class DynamicEngineLoader {
               let fEnd = sym("codexpc_engine_get_end_token_id", as: fn_get_end_token_id_t.self),
               let fSpec = sym("codexpc_engine_get_special_token_id", as: fn_get_special_token_id_t.self)
         else { return nil }
-        return EngineCalls(open: fOpen, close: fClose, reset: fReset, append_tokens: fAppendTokens, append_chars: fAppendChars, sample: fSample, decode_token: fDecode, get_end_token_id: fEnd, get_special_token_id: fSpec)
+        // Optional multi-agent symbols
+        let skvOpen  = sym("codexpc_engine_shared_kv_open", as: fn_shared_kv_open_t.self)
+        let skvOpenEx = sym("codexpc_engine_shared_kv_open_ex", as: fn_shared_kv_open_ex_t.self)
+        let skvClose = sym("codexpc_engine_shared_kv_close", as: fn_shared_kv_close_t.self)
+        let agOpen   = sym("codexpc_engine_agent_open", as: fn_agent_open_t.self)
+        let agClose  = sym("codexpc_engine_agent_close", as: fn_agent_close_t.self)
+        let agReset  = sym("codexpc_engine_agent_reset", as: fn_agent_reset_t.self)
+        let agATok   = sym("codexpc_engine_agent_append_tokens", as: fn_agent_append_tokens_t.self)
+        let agAChr   = sym("codexpc_engine_agent_append_chars", as: fn_agent_append_chars_t.self)
+        let agBound  = sym("codexpc_engine_agent_set_boundary", as: fn_agent_set_boundary_t.self)
+        let agMask   = sym("codexpc_engine_agent_set_logit_mask", as: fn_agent_set_logit_mask_t.self)
+        let agClr    = sym("codexpc_engine_agent_clear_logit_mask", as: fn_agent_clear_logit_mask_t.self)
+        let agSamp   = sym("codexpc_engine_agent_sample", as: fn_agent_sample_t.self)
+        return EngineCalls(open: fOpen, close: fClose, reset: fReset, append_tokens: fAppendTokens, append_chars: fAppendChars, sample: fSample, decode_token: fDecode, get_end_token_id: fEnd, get_special_token_id: fSpec,
+                           shared_kv_open: skvOpen, shared_kv_open_ex: skvOpenEx, shared_kv_close: skvClose,
+                           agent_open: agOpen, agent_close: agClose, agent_reset: agReset,
+                           agent_append_tokens: agATok, agent_append_chars: agAChr,
+                           agent_set_boundary: agBound, agent_set_logit_mask: agMask,
+                           agent_clear_logit_mask: agClr, agent_sample: agSamp)
     }
 }
 
@@ -325,4 +375,87 @@ final class MetalRunner {
         var outCount: Int = 0
         _ = Self.calls.sample(e, 0.0, 0, 1, &toks, &outCount)
     }
+
+    // --- Optional multi-agent wrappers ---
+
+    struct SharedKV { let raw: OpaquePointer }
+    struct Agent { let raw: OpaquePointer }
+
+    func sharedKvOpen(capacityTokens: Int, slots: Int = 1, layout: Int = 0) throws -> SharedKV {
+        guard let e = engine else { throw NSError(domain: "codexpc", code: -1, userInfo: [NSLocalizedDescriptionKey: "engine not open"]) }
+        var out: OpaquePointer? = nil
+        var rc: Int32 = -1
+        if let fex = Self.calls.shared_kv_open_ex {
+            rc = fex(e, Int32(capacityTokens), Int32(slots), Int32(layout), &out)
+        } else if let f = Self.calls.shared_kv_open {
+            rc = f(e, Int32(capacityTokens), &out)
+        }
+        if rc != 0 || out == nil { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "shared_kv_open failed: \(rc)"]) }
+        return SharedKV(raw: out!)
+    }
+
+    func sharedKvClose(_ skv: SharedKV) {
+        guard let f = Self.calls.shared_kv_close else { return }
+        f(skv.raw)
+    }
+
+    func agentOpen(_ skv: SharedKV, slot: Int? = nil) throws -> Agent {
+        guard let e = engine else { throw NSError(domain: "codexpc", code: -1, userInfo: [NSLocalizedDescriptionKey: "engine not open"]) }
+        var out: OpaquePointer? = nil
+        var rc: Int32 = -1
+        if let s = slot, let fex = Self.calls.agent_open_ex {
+            rc = fex(e, skv.raw, Int32(s), &out)
+        } else if let f = Self.calls.agent_open {
+            rc = f(e, skv.raw, &out)
+        }
+        if rc != 0 || out == nil { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "agent_open failed: \(rc)"]) }
+        return Agent(raw: out!)
+    }
+
+    func agentClose(_ agent: Agent) {
+        Self.calls.agent_close?(agent.raw)
+    }
+
+    func agentReset(_ agent: Agent) -> Int32 { Self.calls.agent_reset?(agent.raw) ?? -1 }
+
+    func agentAppend(tokens: [UInt32], to agent: Agent) -> Int32 {
+        return tokens.withUnsafeBufferPointer { bp in
+            if let base = bp.baseAddress { return Self.calls.agent_append_tokens?(agent.raw, base, bp.count) ?? -1 }
+            return 0
+        }
+    }
+
+    func agentAppend(text: String, to agent: Agent) throws -> Int {
+        guard let f = Self.calls.agent_append_chars else { return 0 }
+        var outCount: Int = 0
+        try text.withCString { cstr in
+            let rc = f(agent.raw, cstr, text.utf8.count, &outCount)
+            if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "agent_append_chars failed: \(rc)"]) }
+        }
+        return outCount
+    }
+
+    func agentSetBoundary(_ agent: Agent, atBoundary: Bool) -> Int32 {
+        return Self.calls.agent_set_boundary?(agent.raw, atBoundary ? 1 : 0) ?? -1
+    }
+
+    func agentSetLogitMask(_ agent: Agent, allowed: [Int32]?, banned: [Int32]?) -> Int32 {
+        let aPtr = allowed?.withUnsafeBufferPointer { $0.baseAddress }
+        let aLen = Int32(allowed?.count ?? 0)
+        let bPtr = banned?.withUnsafeBufferPointer { $0.baseAddress }
+        let bLen = Int32(banned?.count ?? 0)
+        return Self.calls.agent_set_logit_mask?(agent.raw, aPtr, Int(aLen), bPtr, Int(bLen)) ?? -1
+    }
+
+    func agentClearLogitMask(_ agent: Agent) -> Int32 { Self.calls.agent_clear_logit_mask?(agent.raw) ?? -1 }
+
+    func agentSample(_ agent: Agent, temperature: Float, seed: UInt64, maxTokens: Int) throws -> [UInt32] {
+        guard let f = Self.calls.agent_sample else { throw NSError(domain: "codexpc", code: -1, userInfo: [NSLocalizedDescriptionKey: "agent_sample symbol not available"]) }
+        var buf = [UInt32](repeating: 0, count: maxTokens)
+        var outCount: Int = 0
+        let rc = f(agent.raw, temperature, seed, maxTokens, &buf, &outCount)
+        if rc != 0 { throw NSError(domain: "codexpc", code: Int(rc), userInfo: [NSLocalizedDescriptionKey: "agent_sample failed: \(rc)"]) }
+        return Array(buf.prefix(outCount))
+    }
+}
 }

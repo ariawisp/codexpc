@@ -80,6 +80,49 @@ final class HarmonyFormatter {
         return count
     }
 
+    // Render only: returns tokens for system+user without appending to engine
+    func renderSystemAndUserTokens(instructions: String?, userParts: [String], toolsJson: String? = nil) throws -> [UInt32] {
+        guard let enc = self.enc else { return [] }
+        var out = HarmonyOwnedU32Array(data: nil, len: 0)
+        var err: UnsafeMutablePointer<CChar>?
+        var cfg = HarmonyRenderConversationConfig(auto_drop_analysis: true)
+        var opts = HarmonyCompletionOptions(final_only_deltas: true, guarded_stop: true, force_next_channel_final: true, tools_json: nil)
+        var arr = HarmonyStringArray(data: nil, len: 0)
+        var cStrings: [UnsafeMutablePointer<CChar>?] = userParts.map { strdup($0) }
+        defer { cStrings.forEach { if let p = $0 { free(p) } } }
+        cStrings.withUnsafeBufferPointer { bp in
+            arr = HarmonyStringArray(data: UnsafeMutablePointer(mutating: bp.baseAddress), len: bp.count)
+        }
+        var sysDup: UnsafeMutablePointer<CChar>? = nil
+        if let s = instructions { sysDup = strdup(s) }
+        let sysPtr = sysDup.map { UnsafePointer<CChar>($0) }
+        let status: HarmonyStatus = "assistant".withCString { nrole in
+            if let toolsJson = toolsJson, !toolsJson.isEmpty {
+                return toolsJson.withCString { ctj in
+                    var o = opts; o.tools_json = ctj
+                    return harmony_encoding_render_system_and_user_for_completion_ex(enc, sysPtr, &arr, nrole, &cfg, &o, &out, &err)
+                }
+            } else {
+                return harmony_encoding_render_system_and_user_for_completion_ex(enc, sysPtr, &arr, nrole, &cfg, &opts, &out, &err)
+            }
+        }
+        if let p = sysDup { free(p) }
+        if status != HARMONY_STATUS_OK {
+            let msg = err.map { String(cString: $0) } ?? "unknown"
+            if let e = err { harmony_string_free(e) }
+            throw NSError(domain: "codexpc", code: Int(status.rawValue), userInfo: [NSLocalizedDescriptionKey: "harmony render failed: \(msg)"])
+        }
+        defer { harmony_owned_u32_array_free(out) }
+        let count = Int(out.len)
+        var toks: [UInt32] = []
+        toks.reserveCapacity(count)
+        if count > 0, let ptr = out.data {
+            let buf = UnsafeBufferPointer(start: ptr, count: count)
+            toks.append(contentsOf: buf)
+        }
+        return toks
+    }
+
     // Appends a prebuilt Harmony conversation JSON directly.
     func appendConversationJSON(to engine: codexpc_engine_t, conversationJson: String, nextRole: String = "assistant", toolsJson: String? = nil, primeParser: OpaquePointer? = nil) throws -> Int {
         guard let enc = self.enc else { return 0 }
