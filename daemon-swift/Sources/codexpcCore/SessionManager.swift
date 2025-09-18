@@ -131,13 +131,15 @@ final class Session {
     private func runSession(checkpoint: String, instructions: String, maxTokens: Int, temperature: Float, toolsPresent: Bool) throws {
         let runner = try MetalRunner(checkpointPath: checkpoint)
         try runner.reset()
+            // Create the Harmony decoder up-front so the formatter can prime the same parser
+            let harmonyDecoder = try HarmonyStreamDecoder()
             var inputTokens: UInt64 = 0
             // Prefer a prebuilt Harmony conversation JSON if provided
             if let convPtr = xpc_dictionary_get_string(req.obj, "harmony_conversation") {
                 let conv = String(cString: convPtr)
                 let fmt = try HarmonyFormatter()
                 let toolsJson = self.toolRegistry?.toolsJsonForHarmony
-                let appended = try runner.appendConversationJSON(conversationJson: conv, nextRole: "assistant", formatter: fmt, toolsJson: toolsJson)
+                let appended = try runner.appendConversationJSON(conversationJson: conv, nextRole: "assistant", formatter: fmt, toolsJson: toolsJson, primeWith: harmonyDecoder)
                 inputTokens += UInt64(appended)
                 log.info("harmony append (json) tokens=\(appended)")
             } else {
@@ -156,13 +158,18 @@ final class Session {
                 if toolsPresent { self.sendToolPlaceholder() }
                 let fmt = try HarmonyFormatter()
                 let toolsJson = self.toolRegistry?.toolsJsonForHarmony
-                let appended = try runner.appendSystemAndUserFormatted(instructions.isEmpty ? nil : instructions, userParts: userParts, formatter: fmt, toolsJson: toolsJson)
+                let appended = try runner.appendSystemAndUserFormatted(instructions.isEmpty ? nil : instructions, userParts: userParts, formatter: fmt, toolsJson: toolsJson, primeWith: harmonyDecoder)
                 inputTokens += UInt64(appended)
                 log.info("harmony append tokens=\(appended) user_parts=\(userParts.count)")
             }
             // No forced tool call path; tools are optional and controlled by ToolExecutor.Config
+            var finalAggregate = ""
             let emitter = StreamEmitter(flushIntervalMs: 20, maxBufferBytes: 4096) { [weak self] chunk in
-                self?.send(eventType: "output_text.delta", body: ["text": chunk])
+                guard let self = self else { return }
+                // Append to aggregate and stream chunk
+                finalAggregate += chunk
+                log.info("sending output_text.delta len=\(chunk.count, privacy: .public) req_id=\(self.reqId, privacy: .public)")
+                self.send(eventType: "output_text.delta", body: ["text": chunk])
             }
             emitter.start()
             var sawDelta = false
@@ -231,7 +238,7 @@ final class Session {
                     }
                     lastToolName = name
                     lastToolOutput = toolOutput
-                })
+                }, using: harmonyDecoder)
                 totalOutTok += outTok
                 if let tname = lastToolName {
                     // Append tool message and continue streaming
@@ -243,8 +250,18 @@ final class Session {
                 }
             }
             watchdog.cancel()
+            // Ensure any buffered deltas are flushed
             emitter.close()
-            self.sendCompleted(inputTokens: inputTokens, outputTokens: UInt64(totalOutTok))
+            // If, for any reason, no deltas reached the client but we have
+            // an aggregate of final text, send it once to guarantee visibility.
+            if !finalAggregate.isEmpty {
+                send(eventType: "output_text.delta", body: ["text": finalAggregate])
+            }
+            // Use an XPC barrier to ensure all previously-sent deltas are
+            // delivered before we send the 'completed' event.
+            xpc_connection_send_barrier(self.connection) {
+                self.sendCompleted(inputTokens: inputTokens, outputTokens: UInt64(totalOutTok))
+            }
         let durMs = Double(DispatchTime.now().uptimeNanoseconds - self.startNs) / 1_000_000.0
         log.debug("session duration_ms=\(durMs, privacy: .public) req_id=\(self.reqId, privacy: .public)")
         self.onFinish(self.reqId)

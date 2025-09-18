@@ -8,6 +8,8 @@ final class HarmonyStreamDecoder {
     private var toolRecipient: String? = nil
     private var toolBuffer: String = ""
     private var didStop: Bool = false
+    private var finalSoFar: String = ""
+    private var duplicateFinalCount: Int = 0
     private var suppressedFormattingDeltas: Int = 0
     private static let debugHarmony: Bool = true
 
@@ -31,13 +33,13 @@ final class HarmonyStreamDecoder {
             throw NSError(domain: "codexpc", code: Int(stp.rawValue), userInfo: [NSLocalizedDescriptionKey: "harmony parser init failed: \(msg)"])
         }
         self.parser = p
-        // Do NOT prime here. The render path emits the assistant header tokens
-        // (including channel=final) which will drive parser state correctly.
-        log.debug("HarmonyStreamDecoder initialized (no prime)")
         if Self.debugHarmony { log.info("harmony debug enabled (env/file)") }
 
         // No raw-decode fallback; rely on event-driven decoding (STOP/TOOL_ARGS_DONE)
     }
+
+    // Expose raw parser handle for render+prime APIs
+    var rawParser: OpaquePointer? { return parser }
 
     // Encode text with optional allowed special list; returns token IDs
     func encode(text: String, allowedSpecial: [String]? = nil) -> [UInt32] {
@@ -112,7 +114,7 @@ final class HarmonyStreamDecoder {
         self.logInfoState(prefix: "after_token")
 
         var outDelta: String? = nil
-        // Drain all available events for this token
+        // Drain at most one meaningful event per token to avoid duplicate deltas
         while true {
             var ev = HarmonyStreamEvent(kind: 0, channel: nil, recipient: nil, name: nil, call_id: nil, text: nil, json: nil)
             let est = harmony_streamable_parser_next_event(p, &ev, &err)
@@ -125,20 +127,24 @@ final class HarmonyStreamDecoder {
             }
             // Map events
             switch ev.kind {
-            case 1: // CONTENT_DELTA
+            case 1: // CONTENT_DELTA (incremental)
                 if let t = ev.text {
                     let s = String(cString: t)
                     let ch = ev.channel.map { String(cString: $0) }
-                    let preview = s.prefix(160).replacingOccurrences(of: "\n", with: " ")
-                    log.info("harmony event: CONTENT_DELTA channel=\(ch ?? "(nil)", privacy: .public) len=\(s.count, privacy: .public) text=\(preview, privacy: .public)")
-                    // Suppress formatting markers accidentally emitted as text by the model.
+                    // Suppress formatting markers sampled as text
                     if Self.isFormattingMarkerText(s) {
                         self.suppressedFormattingDeltas += 1
-                        if self.suppressedFormattingDeltas == 32 || self.suppressedFormattingDeltas % 128 == 0 {
-                            log.info("suppressing formatting deltas count=\(self.suppressedFormattingDeltas)")
-                        }
                     } else if ch == "final" {
+                        // Parser emits incremental deltas already; forward as-is and accumulate
                         outDelta = s
+                        if !s.isEmpty {
+                            finalSoFar += s
+                            duplicateFinalCount = 0
+                            let preview = s.prefix(80).replacingOccurrences(of: "\n", with: " ")
+                            log.info("harmony final inc len=\(s.count, privacy: .public) text=\(preview, privacy: .public)")
+                        }
+                        harmony_stream_event_free(&ev)
+                        break
                     }
                 }
             case 2: // TOOL_CALL_BEGIN
@@ -170,29 +176,12 @@ final class HarmonyStreamDecoder {
             case 5: // STOP
                 didStop = true
                 log.info("harmony event: STOP")
+                harmony_stream_event_free(&ev)
+                return Result(delta: outDelta, toolEvent: nil, isStop: didStop)
             default:
                 break
             }
             harmony_stream_event_free(&ev)
-        }
-
-        // Optionally surface parser delta only if current channel is final
-        var deltaFromParser: String? = nil
-        var chPtr: UnsafeMutablePointer<CChar>? = nil
-        err = nil
-        if harmony_streamable_parser_current_channel(p, &chPtr, &err) == HARMONY_STATUS_OK {
-            defer { if let ch = chPtr { harmony_string_free(ch) } }
-            let channelStr = chPtr.map { String(cString: $0) } ?? ""
-            if channelStr == "final" {
-                var dptr: UnsafeMutablePointer<CChar>?
-                err = nil
-                if harmony_streamable_parser_last_content_delta(p, &dptr, &err) == HARMONY_STATUS_OK, let d = dptr {
-                    deltaFromParser = String(cString: d)
-                    harmony_string_free(d)
-                } else if let e = err { harmony_string_free(e) }
-            }
-        } else if let e = err {
-            harmony_string_free(e)
         }
 
         // If STOP arrives without TOOL_ARGS_DONE (edge-case), finalize any pending tool buffer
@@ -202,18 +191,7 @@ final class HarmonyStreamDecoder {
             toolRecipient = nil
             toolBuffer = ""
         }
-        let mergedDelta: String? = {
-            switch (outDelta, deltaFromParser) {
-            case (nil, nil): return nil
-            case let (a?, nil): return a
-            case let (nil, b?): return b
-            case let (a?, b?):
-                if b.hasPrefix(a) { return b }
-                if a.hasPrefix(b) { return a }
-                return a + b
-            }
-        }()
-        return Result(delta: mergedDelta, toolEvent: toolEvent, isStop: didStop)
+        return Result(delta: outDelta, toolEvent: toolEvent, isStop: didStop)
     }
 
     // Signal end-of-sequence to the parser and drain any pending events (e.g., STOP)

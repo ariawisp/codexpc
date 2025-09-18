@@ -26,50 +26,47 @@ final class HarmonyFormatter {
     }
 
     // Renders a conversation from system + user parts and appends tokens.
-    func appendSystemAndUser(to engine: codexpc_engine_t, instructions: String?, userParts: [String], toolsJson: String? = nil) throws -> Int {
+    func appendSystemAndUser(to engine: codexpc_engine_t, instructions: String?, userParts: [String], toolsJson: String? = nil, primeParser: OpaquePointer? = nil) throws -> Int {
         guard let enc = self.enc else { return 0 }
+        // Use Harmony convenience C API with options; this path supports force_next_channel_final
         var out = HarmonyOwnedU32Array(data: nil, len: 0)
         var err: UnsafeMutablePointer<CChar>?
         var cfg = HarmonyRenderConversationConfig(auto_drop_analysis: true)
         var opts = HarmonyCompletionOptions(final_only_deltas: true, guarded_stop: true, force_next_channel_final: true, tools_json: nil)
-
-        // Build HarmonyMessage array: optional system + one user message per part
-        var messages: [HarmonyMessage] = []
-        var toFree: [UnsafeMutablePointer<CChar>?] = []
-        func dup(_ s: String) -> UnsafeMutablePointer<CChar>? { let p = strdup(s); toFree.append(p); return p }
-        if let sys = instructions, !sys.isEmpty {
-            var contents = [dup(sys)]
-            var cArr = HarmonyStringArray(data: nil, len: 0)
-            contents.withUnsafeMutableBufferPointer { bp in
-                cArr = HarmonyStringArray(data: bp.baseAddress, len: bp.count)
+        // Build HarmonyStringArray for user parts
+        var cStrings: [UnsafeMutablePointer<CChar>?] = userParts.map { strdup($0) }
+        defer { cStrings.forEach { if let p = $0 { free(p) } } }
+        var arr = HarmonyStringArray(data: nil, len: 0)
+        cStrings.withUnsafeBufferPointer { bp in
+            if let base = bp.baseAddress {
+                arr = HarmonyStringArray(data: UnsafeMutablePointer(mutating: base), len: bp.count)
+            } else {
+                arr = HarmonyStringArray(data: nil, len: 0)
             }
-            let msg = HarmonyMessage(role: dup("system"), name: nil, recipient: nil, channel: nil, content_type: nil, contents: cArr)
-            messages.append(msg)
         }
-        for part in userParts where !part.isEmpty {
-            var contents = [dup(part)]
-            var cArr = HarmonyStringArray(data: nil, len: 0)
-            contents.withUnsafeMutableBufferPointer { bp in
-                cArr = HarmonyStringArray(data: bp.baseAddress, len: bp.count)
-            }
-            let msg = HarmonyMessage(role: dup("user"), name: nil, recipient: nil, channel: nil, content_type: nil, contents: cArr)
-            messages.append(msg)
-        }
-        let status: HarmonyStatus = messages.withUnsafeMutableBufferPointer { bp in
-            var mArray = HarmonyMessageArray(data: bp.baseAddress, len: bp.count)
-            return "assistant".withCString { nrole in
-                if let tj = toolsJson, !tj.isEmpty {
-                    return tj.withCString { ctj in
-                        var o = opts; o.tools_json = ctj
-                        return harmony_encoding_render_conversation_from_messages_ex(enc, &mArray, nrole, &cfg, &o, &out, &err)
+        var sysDup: UnsafeMutablePointer<CChar>? = nil
+        if let s = instructions { sysDup = strdup(s) }
+        let sysPtr = sysDup.map { UnsafePointer<CChar>($0) }
+        let status: HarmonyStatus = "assistant".withCString { nrole in
+            if let toolsJson = toolsJson, !toolsJson.isEmpty {
+                return toolsJson.withCString { ctj in
+                    var o = opts
+                    o.tools_json = ctj
+                    if let p = primeParser {
+                        return harmony_encoding_render_system_and_user_for_completion_and_prime_ex(enc, sysPtr, &arr, nrole, &cfg, &o, p, &out, &err)
+                    } else {
+                        return harmony_encoding_render_system_and_user_for_completion_ex(enc, sysPtr, &arr, nrole, &cfg, &o, &out, &err)
                     }
+                }
+            } else {
+                if let p = primeParser {
+                    return harmony_encoding_render_system_and_user_for_completion_and_prime_ex(enc, sysPtr, &arr, nrole, &cfg, &opts, p, &out, &err)
                 } else {
-                    return harmony_encoding_render_conversation_from_messages_ex(enc, &mArray, nrole, &cfg, &opts, &out, &err)
+                    return harmony_encoding_render_system_and_user_for_completion_ex(enc, sysPtr, &arr, nrole, &cfg, &opts, &out, &err)
                 }
             }
         }
-        // Free all strdup'd strings
-        toFree.forEach { if let p = $0 { free(p) } }
+        if let p = sysDup { free(p) }
         if status != HARMONY_STATUS_OK {
             let msg = err.map { String(cString: $0) } ?? "unknown"
             if let e = err { harmony_string_free(e) }
@@ -84,7 +81,7 @@ final class HarmonyFormatter {
     }
 
     // Appends a prebuilt Harmony conversation JSON directly.
-    func appendConversationJSON(to engine: codexpc_engine_t, conversationJson: String, nextRole: String = "assistant", toolsJson: String? = nil) throws -> Int {
+    func appendConversationJSON(to engine: codexpc_engine_t, conversationJson: String, nextRole: String = "assistant", toolsJson: String? = nil, primeParser: OpaquePointer? = nil) throws -> Int {
         guard let enc = self.enc else { return 0 }
         var out = HarmonyOwnedU32Array(data: nil, len: 0)
         var err: UnsafeMutablePointer<CChar>?
@@ -96,10 +93,18 @@ final class HarmonyFormatter {
                     return toolsJson.withCString { ctj in
                         var o = opts
                         o.tools_json = ctj
-                        return harmony_encoding_render_conversation_for_completion_ex(enc, cjson, nrole, &cfg, &o, &out, &err)
+                        if let p = primeParser {
+                            return harmony_encoding_render_conversation_for_completion_and_prime_ex(enc, cjson, nrole, &cfg, &o, p, &out, &err)
+                        } else {
+                            return harmony_encoding_render_conversation_for_completion_ex(enc, cjson, nrole, &cfg, &o, &out, &err)
+                        }
                     }
                 } else {
-                    return harmony_encoding_render_conversation_for_completion_ex(enc, cjson, nrole, &cfg, &opts, &out, &err)
+                    if let p = primeParser {
+                        return harmony_encoding_render_conversation_for_completion_and_prime_ex(enc, cjson, nrole, &cfg, &opts, p, &out, &err)
+                    } else {
+                        return harmony_encoding_render_conversation_for_completion_ex(enc, cjson, nrole, &cfg, &opts, &out, &err)
+                    }
                 }
             }
         }
@@ -109,7 +114,11 @@ final class HarmonyFormatter {
             log.debug("Harmony render (json) with tools_json failed; retrying without tools. err=\(msg, privacy: .public)")
             err = nil
             status = conversationJson.withCString { cjson in
-                harmony_encoding_render_conversation_for_completion_ex(enc, cjson, nextRole, &cfg, &opts, &out, &err)
+                if let p = primeParser {
+                    return harmony_encoding_render_conversation_for_completion_and_prime_ex(enc, cjson, nextRole, &cfg, &opts, p, &out, &err)
+                } else {
+                    return harmony_encoding_render_conversation_for_completion_ex(enc, cjson, nextRole, &cfg, &opts, &out, &err)
+                }
             }
         }
         if status != HARMONY_STATUS_OK {

@@ -79,15 +79,15 @@ final class MetalRunner {
         return try formatter.appendSystem(to: e, instructions: instructions)
     }
 
-    func appendSystemAndUserFormatted(_ instructions: String?, userParts: [String], formatter: HarmonyFormatter, toolsJson: String? = nil) throws -> Int {
+    func appendSystemAndUserFormatted(_ instructions: String?, userParts: [String], formatter: HarmonyFormatter, toolsJson: String? = nil, primeWith decoder: HarmonyStreamDecoder? = nil) throws -> Int {
         guard let e = engine else { return 0 }
-        return try formatter.appendSystemAndUser(to: e, instructions: instructions, userParts: userParts, toolsJson: toolsJson)
+        return try formatter.appendSystemAndUser(to: e, instructions: instructions, userParts: userParts, toolsJson: toolsJson, primeParser: decoder?.rawParser)
     }
 
     // Appends a pre-built Harmony conversation JSON via the formatter
-    func appendConversationJSON(conversationJson: String, nextRole: String = "assistant", formatter: HarmonyFormatter, toolsJson: String? = nil) throws -> Int {
+    func appendConversationJSON(conversationJson: String, nextRole: String = "assistant", formatter: HarmonyFormatter, toolsJson: String? = nil, primeWith decoder: HarmonyStreamDecoder? = nil) throws -> Int {
         guard let e = engine else { return 0 }
-        return try formatter.appendConversationJSON(to: e, conversationJson: conversationJson, nextRole: nextRole, toolsJson: toolsJson)
+        return try formatter.appendConversationJSON(to: e, conversationJson: conversationJson, nextRole: nextRole, toolsJson: toolsJson, primeParser: decoder?.rawParser)
     }
 
     func appendToolMessage(toolName: String, output: String, formatter: HarmonyFormatter) throws -> Int {
@@ -96,15 +96,16 @@ final class MetalRunner {
     }
 
     // Streams tokens, calling onDelta with decoded text, and returns number of tokens generated
-    func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void, onToolCall: ((String, String) -> Void)? = nil) throws -> Int {
+    func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void, onToolCall: ((String, String) -> Void)? = nil, using decoder: HarmonyStreamDecoder? = nil) throws -> Int {
         guard let e = engine else { return 0 }
         var generated = 0
         var tokensSinceDelta = 0
+        var finalLen = 0
         let seed: UInt64 = 0
         let batch = 16
         var tokens = [UInt32](repeating: 0, count: batch)
         var outCount: Int = 0
-        let harmonyDecoder = try HarmonyStreamDecoder()
+        let harmonyDecoder = try (decoder ?? HarmonyStreamDecoder())
         // One-time check: verify Harmony vs GPT-OSS special token IDs align
         do {
             var ids: [(String, Int32, UInt32, [UInt32])] = []
@@ -194,21 +195,12 @@ final class MetalRunner {
             for i in 0..<outCount {
                 if isCancelled() { return generated }
                 let t = tokens[i]
-                if endToken != 0 && t == endToken {
-                    log.info("engine eos encountered")
-                    let res = harmonyDecoder.processEOS()
-                    if let d = res.delta, !d.isEmpty {
-                        if !loggedFirstDelta { log.info("first delta len=\(d.count)"); loggedFirstDelta = true }
-                        onDelta(d)
-                    }
-                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input) }
-                    return generated
-                }
                 let res = harmonyDecoder.process(token: t)
                 if let d = res.delta, !d.isEmpty {
                     if !loggedFirstDelta { log.info("first delta len=\(d.count)"); loggedFirstDelta = true }
                     onDelta(d)
                     tokensSinceDelta = 0
+                    finalLen += d.count
                 }
                 if let ev = res.toolEvent { onToolCall?(ev.name, ev.input); return generated }
                 if res.isStop { return generated }
@@ -219,6 +211,14 @@ final class MetalRunner {
                     harmonyDecoder.logInfoState(prefix: "no_final_deltas_128")
                 } else if !loggedFirstDelta && tokensSinceDelta % 512 == 0 {
                     log.info("still waiting for final deltas; tokens=\(tokensSinceDelta)")
+                }
+                // If we've emitted some final text but made no progress after a while, flush EOS to finish
+                if finalLen > 0 && tokensSinceDelta >= 64 {
+                    log.info("no progress in final channel after \(tokensSinceDelta) tokens; flushing EOS")
+                    let res = harmonyDecoder.processEOS()
+                    if let d = res.delta, !d.isEmpty { onDelta(d) }
+                    if let ev = res.toolEvent { onToolCall?(ev.name, ev.input) }
+                    return generated
                 }
                 if generated >= maxTokens || isCancelled() { return generated }
             }

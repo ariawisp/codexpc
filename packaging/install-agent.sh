@@ -34,8 +34,12 @@ export GPTOSS_INCLUDE_DIR GPTOSS_LIB_DIR
 echo "Building codexpcd (release)..."
 # Align the app's deployment target with Harmony's to avoid ld warnings
 MINOS="$({ otool -l "$HARMONY_LIB_DIR/libopenai_harmony.dylib" 2>/dev/null || true; } | awk '/LC_BUILD_VERSION/,/cmdsize/ { if ($1=="minos") { print $2; exit } }')"
+if [ -z "$MINOS" ]; then
+  # Fallback to SDK platform version
+  MINOS="$(xcrun --sdk macosx --show-sdk-platform-version 2>/dev/null || xcrun --sdk macosx --show-sdk-version 2>/dev/null || true)"
+fi
 if [ -n "$MINOS" ]; then
-  echo "Detected Harmony dylib min macOS: $MINOS"
+  echo "Using MACOSX_DEPLOYMENT_TARGET=$MINOS for codexpcd"
   (cd "$ROOT_DIR/daemon-swift" && MACOSX_DEPLOYMENT_TARGET="$MINOS" swift build -c release)
 else
   (cd "$ROOT_DIR/daemon-swift" && swift build -c release)
