@@ -94,7 +94,7 @@ final class HarmonyStreamDecoder {
     // Result of processing a token
     struct Result {
         let delta: String?
-        let toolEvent: (name: String, input: String)?
+        let toolEvent: (name: String, input: String, callId: String)?
         let isStop: Bool
     }
 
@@ -170,8 +170,10 @@ final class HarmonyStreamDecoder {
                     toolRecipient = nil
                     toolBuffer = ""
                     log.info("harmony event: TOOL_ARGS_DONE recipient=\(name, privacy: .public) bytes=\(args.utf8.count, privacy: .public)")
+                    var callId = ""
+                    if let cid = ev.call_id { callId = String(cString: cid) }
                     harmony_stream_event_free(&ev)
-                    return Result(delta: outDelta, toolEvent: (name: name, input: args), isStop: didStop)
+                    return Result(delta: outDelta, toolEvent: (name: name, input: args, callId: callId), isStop: didStop)
                 }
             case 5: // STOP
                 didStop = true
@@ -185,7 +187,7 @@ final class HarmonyStreamDecoder {
         }
 
         // If STOP arrives without TOOL_ARGS_DONE (edge-case), finalize any pending tool buffer
-        var toolEvent: (String, String)? = nil
+        var toolEvent: (String, String, String)? = nil
         if didStop, let rec = toolRecipient, !rec.isEmpty {
             toolEvent = (rec, toolBuffer)
             toolRecipient = nil
@@ -218,7 +220,11 @@ final class HarmonyStreamDecoder {
             case 1:
                 if let t = ev.text { outDelta = String(cString: t) }
             case 4:
-                if let rc = ev.recipient { toolEvent = (String(cString: rc), toolBuffer) }
+                if let rc = ev.recipient {
+                    var cid = ""
+                    if let c = ev.call_id { cid = String(cString: c) }
+                    toolEvent = (String(cString: rc), toolBuffer, cid)
+                }
             case 5:
                 didStop = true
             default:
@@ -226,7 +232,10 @@ final class HarmonyStreamDecoder {
             }
             harmony_stream_event_free(&ev)
         }
-        return Result(delta: outDelta, toolEvent: toolEvent, isStop: didStop)
+        if let te = toolEvent {
+            return Result(delta: outDelta, toolEvent: (name: te.0, input: te.1, callId: te.2), isStop: didStop)
+        }
+        return Result(delta: outDelta, toolEvent: nil, isStop: didStop)
     }
 
     // Info-level dump of current parser state (not behind debug flags).

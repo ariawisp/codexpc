@@ -208,6 +208,7 @@ final class Session {
             var continueStreaming = true
             var lastToolName: String? = nil
             var lastToolOutput: String? = nil
+            var lastCallId: String? = nil
             while continueStreaming && !self.cancelled {
                 lastToolName = nil
                 lastToolOutput = nil
@@ -216,20 +217,21 @@ final class Session {
                 }, onDelta: { text in
                     if !sawDelta && !text.isEmpty { sawDelta = true }
                     emitter.submit(text)
-                }, onToolCall: { [weak self] name, input in
+                }, onToolCall: { [weak self] name, input, callId in
                     guard let self = self else { return }
                     // Validate arguments if a schema is present
                     if let reg = self.toolRegistry {
                         let vr = reg.validate(name: name, inputJson: input)
                         if !vr.ok {
-                            self.sendToolCall(name: name, input: input)
+                            self.sendToolCall(name: name, input: input, callId: callId)
                             self.sendToolFailure(name: name, error: vr.error ?? "invalid arguments")
                             lastToolName = name
                             lastToolOutput = vr.error ?? "invalid arguments"
+                            lastCallId = callId
                             return
                         }
                     }
-                    self.sendToolCall(name: name, input: input)
+                    self.sendToolCall(name: name, input: input, callId: callId)
                     var toolOutput = ""
                     if self.allowTools {
                         let res = ToolExecutor.executeEnforced(name: name, input: input)
@@ -238,6 +240,7 @@ final class Session {
                     }
                     lastToolName = name
                     lastToolOutput = toolOutput
+                    lastCallId = callId
                 }, using: harmonyDecoder)
                 totalOutTok += outTok
                 if let tname = lastToolName {
@@ -335,7 +338,7 @@ final class Session {
         xpc_connection_send_message(connection, msg)
     }
 
-    private func sendToolCall(name: String, input: String) {
+    private func sendToolCall(name: String, input: String, callId: String? = nil) {
         let msg = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_string(msg, "service", "codexpc")
         xpc_dictionary_set_uint64(msg, "proto_version", 1)
@@ -347,6 +350,7 @@ final class Session {
         xpc_dictionary_set_string(item, "status", "requested")
         xpc_dictionary_set_string(item, "name", name)
         xpc_dictionary_set_string(item, "input", input)
+        if let cid = callId { xpc_dictionary_set_string(item, "call_id", cid) }
         if Session.isValidJson(input) {
             xpc_dictionary_set_string(item, "arguments", input)
         }
@@ -354,7 +358,7 @@ final class Session {
         xpc_connection_send_message(connection, msg)
     }
 
-    private func sendToolOutput(name: String, output: String) {
+    private func sendToolOutput(name: String, output: String, callId: String? = nil) {
         let msg = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_string(msg, "service", "codexpc")
         xpc_dictionary_set_uint64(msg, "proto_version", 1)
@@ -366,11 +370,12 @@ final class Session {
         xpc_dictionary_set_string(item, "status", "completed")
         xpc_dictionary_set_string(item, "name", name)
         xpc_dictionary_set_string(item, "output", output)
+        if let cid = callId { xpc_dictionary_set_string(item, "call_id", cid) }
         xpc_dictionary_set_value(msg, "item", item)
         xpc_connection_send_message(connection, msg)
     }
 
-    private func sendToolFailure(name: String, error: String) {
+    private func sendToolFailure(name: String, error: String, callId: String? = nil) {
         let msg = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_string(msg, "service", "codexpc")
         xpc_dictionary_set_uint64(msg, "proto_version", 1)
@@ -382,6 +387,7 @@ final class Session {
         xpc_dictionary_set_string(item, "status", "failed")
         xpc_dictionary_set_string(item, "name", name)
         xpc_dictionary_set_string(item, "output", error)
+        if let cid = callId { xpc_dictionary_set_string(item, "call_id", cid) }
         xpc_dictionary_set_value(msg, "item", item)
         xpc_connection_send_message(connection, msg)
     }

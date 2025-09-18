@@ -96,7 +96,7 @@ final class MetalRunner {
     }
 
     // Streams tokens, calling onDelta with decoded text, and returns number of tokens generated
-    func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void, onToolCall: ((String, String) -> Void)? = nil, using decoder: HarmonyStreamDecoder? = nil) throws -> Int {
+    func stream(temperature: Float, maxTokens: Int, isCancelled: @escaping () -> Bool, onDelta: @escaping (String) -> Void, onToolCall: ((String, String, String) -> Void)? = nil, using decoder: HarmonyStreamDecoder? = nil) throws -> Int {
         guard let e = engine else { return 0 }
         var generated = 0
         var tokensSinceDelta = 0
@@ -202,7 +202,7 @@ final class MetalRunner {
                     tokensSinceDelta = 0
                     finalLen += d.count
                 }
-                if let ev = res.toolEvent { onToolCall?(ev.name, ev.input); return generated }
+                if let ev = res.toolEvent { onToolCall?(ev.name, ev.input, ev.callId); return generated }
                 if res.isStop { return generated }
                 generated += 1
                 tokensSinceDelta += 1
