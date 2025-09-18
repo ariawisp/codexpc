@@ -252,9 +252,10 @@ final class Session {
             watchdog.cancel()
             // Ensure any buffered deltas are flushed
             emitter.close()
-            // If, for any reason, no deltas reached the client but we have
-            // an aggregate of final text, send it once to guarantee visibility.
-            if !finalAggregate.isEmpty {
+            // If no deltas were sent (e.g., emitter coalesced to zero flushes),
+            // send the aggregate once as a fallback for visibility.
+            if !sawDelta && !finalAggregate.isEmpty {
+                log.info("sending fallback output_text.delta len=\(finalAggregate.count, privacy: .public) req_id=\(self.reqId, privacy: .public)")
                 send(eventType: "output_text.delta", body: ["text": finalAggregate])
             }
             // Use an XPC barrier to ensure all previously-sent deltas are
