@@ -1,4 +1,0 @@
-headers = /usr/include/xpc/xpc.h
-compilerOpts = -F/System/Library/Frameworks -framework XPC -framework CoreFoundation -framework Foundation
-linkerOpts = -F/System/Library/Frameworks -framework XPC -framework CoreFoundation -framework Foundation
-

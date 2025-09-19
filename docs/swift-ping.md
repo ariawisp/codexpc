@@ -1,6 +1,6 @@
 # Swift ping example
 
-Drop this into a scratch Swift file to ping the service while building the Kotlin/Native client.
+Drop this into a scratch Swift file to ping the service.
 
 ```
 import Foundation
@@ -30,4 +30,3 @@ xpc_connection_send_message(conn, msg)
 
 RunLoop.current.run()
 ```
-

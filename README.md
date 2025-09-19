@@ -1,10 +1,9 @@
 # codexpc
 
-Local macOS XPC daemon and client for GPT‑OSS inference on Apple Silicon.
+Local macOS XPC daemon for GPT‑OSS inference on Apple Silicon.
 
 - Transport: libxpc (Mach service LaunchAgent)
 - Daemon: Swift + ObjC++ bridge to GPT‑OSS Metal C API
-- Client: Kotlin/Native via Objective‑C/C interop to libxpc
 
 This repo is macOS‑only and focuses on low‑latency local inference. It does not depend on HTTP/SSE.
 
@@ -12,8 +11,7 @@ This repo is macOS‑only and focuses on low‑latency local inference. It does 
 
 - `daemon-swift/` — SwiftPM workspace containing the XPC daemon and core
 - `daemon-swift/Sources/codexpcEngine/` — ObjC++/C headers and bridge (Swift target `codexpcEngine`)
-- `client-kotlin-native/` — Kotlin/Native client library that speaks libxpc
-- `cli/` — Minimal debug CLI built on the K/N client
+- `cli-swift/` — Minimal debug CLI implemented in Swift
 - `protocol/` — Protocol docs and JSON samples
 - `packaging/` — LaunchAgent plist and install scripts
 - `docs/` — Quickstart and deeper design notes
@@ -58,9 +56,9 @@ swift build -c release \
 
 Alternatively, vendor a thin CMake build step that compiles the GPT‑OSS Metal library as part of your CI and sets up a pkg‑config file. See `docs/engine-integration.md`.
 
-## Kotlin/Native client
+## Client usage
 
-See `client-kotlin-native/README.md` for cinterop setup and a basic streaming example.
+The primary client is codex‑rs (in the sibling `../codex/` repo). For quick smoke tests, use the Swift CLI in `cli-swift/`.
 
 ## Protocol
 

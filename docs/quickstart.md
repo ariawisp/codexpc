@@ -17,7 +17,7 @@ Run it in a terminal:
 
 ## Ping using a tiny test client (Swift)
 
-While the Kotlin/Native client is being built, you can test the daemon via `xpc_connection_create_mach_service` in a short Swift snippet (see `docs/swift-ping.md`).
+You can test the daemon via `xpc_connection_create_mach_service` in a short Swift snippet (see `docs/swift-ping.md`).
 
 ## Install LaunchAgent
 
